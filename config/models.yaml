@@ -1,0 +1,206 @@
+# ---------------------------------------------------------------------------
+# Model registry for the persona-sycophancy assumptions study.
+#
+# Same schema as config/models.yaml in myazan/LLM-Self-Concept, so an entry can
+# be copied between the two repos unchanged. Only the models this study actually
+# administers are listed; add more by pasting the entry across.
+#
+#   alias      short, stable name -- used in CLI args, filenames, and the
+#              `model_id` column of every results row.
+#   ref        the concrete thing to load. Its SHAPE picks the backend:
+#                *.gguf / *-GGUF  -> llamacpp
+#                "org/name"       -> hf (transformers)
+#                bare name        -> the family's API (openai | anthropic)
+#              `backend:` overrides that.
+#   hf_id      the unquantized upstream, recorded for provenance.
+#   tokenizer_id  public repo the chat template is read from (GGUF path needs
+#              this: llama.cpp has the weights, transformers has the template).
+#
+# GGUF filenames are NOT pinned here -- the loader resolves the file from the
+# repo listing using the quant tag, because those names drift (Q4_K_M vs
+# UD-Q4_K_M vs sharded -00001-of-00002). Pin one with `gguf_file:` if needed.
+# ---------------------------------------------------------------------------
+
+schema_version: "1.0"
+
+# --- defaults applied to every model unless overridden per-entry ------------
+defaults:
+  # Decoding follows the paper's get_assumptions.py so the probe is
+  # administered the way it was validated: temperature 0.7, top_p 0.9.
+  temperature: 0.7
+  top_p: 0.9
+  # One cell must fit a k-model JSON block AND a full advice reply. The paper
+  # asked for 5000; 2048 covers a 3-model block plus a long reply on every
+  # model checked here, and a truncated cell is visible in the parse
+  # diagnostics (`has_response: false`), so raise it per-model if they show up.
+  max_output_tokens: 2048
+  batch_size: 8        # local backends: prompts per batched generate() call
+  max_workers: 4       # API backends: concurrent in-flight requests
+  quantization:
+    gguf:
+      quant: Q4_K_M
+      prefer_unsloth_dynamic: false
+    hf:
+      method: none     # none | bnb-4bit | bnb-8bit | awq | gptq-int4 | fp8
+  runtime:
+    llamacpp:
+      # The persona transcript + the dilemma + a k-model block + a reply do not
+      # fit in 4096. Personas run to ~8 turns, so keep this generous; the
+      # runner errors loudly rather than silently truncating a persona.
+      n_ctx: 16384
+      n_gpu_layers: -1
+      n_threads: null
+    hf:
+      # `auto` needs accelerate; without it the adapter loads onto CUDA, else
+      # CPU. It never picks MPS on its own -- Apple's backend returns NaN logits
+      # for left-padded batches, which batched generation requires. Set
+      # `device_map: mps` per model to opt in anyway; on Apple silicon the
+      # llamacpp backend is the better local path.
+      device_map: auto
+      torch_dtype: auto
+
+# --- reasoning control -------------------------------------------------------
+# The probe wants the assumptions VERBALIZED, before the answer. A model that
+# reasons in a hidden channel and then prints three tidy mental models has not
+# shown us what drove its reply, so runs assert thinking OFF where they can and
+# record what was actually applied on every row.
+reasoning_by_family:
+  gemma:
+    thinks_by_default: false
+    control: none
+    controllable: true
+  qwen:
+    thinks_by_default: true
+    control: template_toggle      # chat template enable_thinking=False
+    controllable: true
+  claude:
+    thinks_by_default: true       # Opus 5 / Sonnet 5 think by default; 4.5 does not
+    control: thinking_param
+    controllable: true
+  gpt:
+    thinks_by_default: true       # GPT-5.x are reasoning models
+    control: effort
+    controllable: true
+
+models:
+
+  # =========================================================================
+  # GEMMA -- the model the existing answers table was collected on
+  # =========================================================================
+
+  # Matches files/gemma-3-12b-it_long_results.pkl. Use this alias when adding
+  # assumption rows alongside answers that already exist.
+  - alias: Gemma3-12B
+    family: gemma
+    generation: gemma-3
+    release_date: "2025-03-12"
+    params_total_b: 12
+    size_tier: small
+    backend: hf
+    ref: google/gemma-3-12b-it
+    hf_id: google/gemma-3-12b-it
+    quantization: {format: hf, method: bnb-4bit}
+
+  # Same weights through llama.cpp. Cheaper on a Mac, and the quant is baked
+  # into the file rather than applied at load time.
+  - alias: Gemma3-12B-gguf
+    family: gemma
+    generation: gemma-3
+    release_date: "2025-03-12"
+    params_total_b: 12
+    size_tier: small
+    backend: llamacpp
+    ref: unsloth/gemma-3-12b-it-GGUF
+    hf_id: google/gemma-3-12b-it
+    tokenizer_id: unsloth/gemma-3-12b-it
+    quantization: {format: gguf, quant: Q4_K_M}
+
+  # The cheap smoke-test model: same family and chat template as the 12B, small
+  # enough to run unquantized on a laptop. Use it to check a design and the
+  # parse rate before committing a long run to the 12B.
+  - alias: Gemma3-4B
+    family: gemma
+    generation: gemma-3
+    release_date: "2025-03-12"
+    params_total_b: 4
+    size_tier: small
+    backend: hf
+    ref: google/gemma-3-4b-it
+    hf_id: google/gemma-3-4b-it
+
+  - alias: Gemma3-4B-gguf
+    family: gemma
+    generation: gemma-3
+    release_date: "2025-03-12"
+    params_total_b: 4
+    size_tier: small
+    backend: llamacpp
+    ref: unsloth/gemma-3-4b-it-GGUF
+    hf_id: google/gemma-3-4b-it
+    tokenizer_id: unsloth/gemma-3-4b-it
+    quantization: {format: gguf, quant: Q4_K_M}
+
+  - alias: Gemma3-27B
+    family: gemma
+    generation: gemma-3
+    release_date: "2025-03-12"
+    params_total_b: 27
+    size_tier: medium
+    backend: llamacpp
+    ref: unsloth/gemma-3-27b-it-GGUF
+    hf_id: google/gemma-3-27b-it
+    tokenizer_id: unsloth/gemma-3-27b-it
+    quantization: {format: gguf, quant: Q4_K_M}
+    enabled: false
+
+  # =========================================================================
+  # QWEN -- open weights, hybrid thinking (asserted off by the adapter)
+  # =========================================================================
+
+  - alias: Qwen3.5-9B
+    family: qwen
+    generation: qwen-3.5
+    release_date: "2025-11-18"
+    params_total_b: 9
+    size_tier: small
+    backend: llamacpp
+    ref: unsloth/Qwen3.5-9B-GGUF
+    hf_id: Qwen/Qwen3.5-9B
+    tokenizer_id: unsloth/Qwen3.5-9B
+    quantization: {format: gguf, quant: Q4_K_M}
+    enabled: false
+
+  # =========================================================================
+  # CLAUDE -- API
+  # =========================================================================
+
+  - alias: Claude-Sonnet-5
+    family: claude
+    generation: claude-5
+    release_date: "2026-02-05"
+    ref: claude-sonnet-5
+    backend: anthropic
+    max_workers: 8
+    enabled: false
+
+  - alias: Claude-Haiku-4.5
+    family: claude
+    generation: claude-4.5
+    release_date: "2025-10-01"
+    ref: claude-haiku-4-5-20251001
+    backend: anthropic
+    max_workers: 8
+    enabled: false
+
+  # =========================================================================
+  # GPT -- API
+  # =========================================================================
+
+  - alias: GPT-5.6
+    family: gpt
+    generation: gpt-5.6
+    release_date: "2026-05-20"
+    ref: gpt-5.6
+    backend: openai
+    max_workers: 8
+    enabled: false

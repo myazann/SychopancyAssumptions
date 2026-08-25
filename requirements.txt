@@ -1,0 +1,21 @@
+# Planning, the grid, and --dry-run need only these.
+pyyaml
+pandas
+pyarrow            # parquet output from parse_assumptions.py
+
+# --- model registry -------------------------------------------------------
+huggingface_hub    # GGUF filename resolution + weight download
+
+# --- local backends -------------------------------------------------------
+transformers       # chat templates always; the `hf` backend's engine
+# torch            # required by transformers to load weights
+# accelerate       # device_map sharding; required with bitsandbytes
+# bitsandbytes     # bnb-4bit / bnb-8bit quantization for the `hf` backend
+# llama-cpp-python # the `llamacpp` backend (GGUF)
+
+# --- API backends ---------------------------------------------------------
+# openai           # GPT family    (needs OPENAI_API_KEY)
+# anthropic        # Claude family (needs ANTHROPIC_API_KEY)
+
+# --- optional -------------------------------------------------------------
+# openpyxl         # summarize_assumptions.py --out report.xlsx
