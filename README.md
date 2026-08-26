@@ -72,11 +72,14 @@ This starts a resumable experiment with the smallest enabled model:
 python -m syco run \
     --model Llama-3.1-8B \
     --n-personas 25 \
-    --n-prompts 20 \
-    --out results/Llama-3.1-8B_openended3v2-native.jsonl
+    --n-prompts 20
 ```
 
-Re-run the same command to resume. Use `--plan-only` to inspect it without
+By default this writes every model-specific artifact under
+`results/Llama-3.1-8B/`; the raw file is
+`openended3v2-native.jsonl`. Re-run the same command to resume. Use
+`--output-contract-version 1` only to continue a compatible pilot collected
+with the original prompt. Use `--plan-only` to inspect it without
 loading weights, or add `--limit 10` for a ten-cell trial.
 
 The JSONL is the append-safe raw acquisition log; parsing creates a typed

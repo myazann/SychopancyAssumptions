@@ -49,6 +49,7 @@ def _expected_manifest(profile: ExperimentProfile, registry, spec) -> dict:
         kind=args.probe,
         history_mode=args.history_mode,
         n_models=args.n_models,
+        output_contract_version=args.output_contract_version,
     )
     return build_manifest(args=args, spec=effective_spec, probe=probe)
 
@@ -447,8 +448,8 @@ def smoke(profile: ExperimentProfile, model: str | None = None) -> int:
 
     registry = load_registry()
     spec = registry.get(model) if model else profile.select_models(registry)[0]
-    smoke_dir = profile.results_dir / "smoke"
-    output = smoke_dir / f"{spec.safe_dir_name()}_{profile.name}.jsonl"
+    smoke_dir = profile.results_dir / spec.safe_dir_name() / "smoke"
+    output = smoke_dir / f"{profile.name}.jsonl"
     args = [
         *profile.run_args(spec),
         "--out", str(output),

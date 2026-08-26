@@ -75,17 +75,16 @@ python -m syco run --model Gemma3-12B --plan-only \
 
 # exercise the whole pipeline offline against the mock backend
 python -m syco run --model Gemma3-12B --dry-run \
-    --n-personas 2 --n-prompts 2 --out results/smoke.jsonl
+    --n-personas 2 --n-prompts 2
 
 # the real thing, on cells the existing answers table already covers
 python -m syco run --model Gemma3-12B \
     --match-existing files/gemma-3-12b-it_long_results.pkl \
-    --n-personas 25 --n-prompts 20 \
-    --out results/gemma3-12b_openended.jsonl
+    --n-personas 25 --n-prompts 20
 
-python -m syco parse     results/gemma3-12b_openended.jsonl
-python -m syco summarize results/gemma3-12b_openended_assumptions.parquet
-python -m syco topics    results/gemma3-12b_openended_assumptions.parquet
+python -m syco parse     results/Gemma3-12B/openended3v2-native.jsonl
+python -m syco summarize results/Gemma3-12B/openended3v2-native_assumptions.parquet
+python -m syco topics    results/Gemma3-12B/openended3v2-native_assumptions.parquet
 ```
 
 `requirements.txt` lists its runtime packages explicitly. See README.md for
@@ -101,6 +100,12 @@ error are retried, and parsing keeps the latest successful attempt per cell.
 A truncated final line from a killed run is ignored. Ctrl-C once finishes the
 batch in flight and flushes. `--no-resume` now requires a new/empty output;
 `--overwrite` explicitly replaces an existing output and manifest.
+
+Without `--out`, all model-specific artifacts use
+`results/<model>/<probe>.*`: raw JSONL, manifest, run log, and derived tables
+stay together. Contract v2 is the default for new work. The explicit
+`--output-contract-version 1` compatibility mode preserves the original prompt
+and label so an interrupted v1 pilot can resume without mixing instruments.
 
 `--match-existing` is the flag that matters for comparing against work already
 done: it restricts the grid to full `(persona_type, persona_id, prompt_type,

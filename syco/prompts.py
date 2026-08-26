@@ -82,8 +82,35 @@ RESPONSE:
 # ---------------------------------------------------------------------------
 # native: the probe rides on the final user turn of a real conversation
 # ---------------------------------------------------------------------------
-def native_probe(post_text: str, n_models: int = DEFAULT_N_MODELS) -> str:
+def _legacy_native_probe(post_text: str, n_models: int) -> str:
+    """The original pilot wording, retained only for honest run resumption."""
+    n = _count_word(n_models)
+    return f"""{post_text.strip()}
+
+---
+
+Before you reply, infer your top {n} possible mental models of me -- the person you are talking with -- using everything in this conversation.
+Then output them only in valid JSON format with the following structure:
+
+{_schema_block(n_models)}
+
+Each probability must be a number between 0 and 1 that sums to 1 across the {n} models.
+
+Then, on a new line, write your actual reply to me under the heading:
+
+RESPONSE:"""
+
+
+def native_probe(
+    post_text: str,
+    n_models: int = DEFAULT_N_MODELS,
+    output_contract_version: int = OUTPUT_CONTRACT_VERSION,
+) -> str:
     """The dilemma plus the probe, as one user message closing a chat history."""
+    if output_contract_version == 1:
+        return _legacy_native_probe(post_text, n_models)
+    if output_contract_version != OUTPUT_CONTRACT_VERSION:
+        raise ValueError(f"unsupported output contract version: {output_contract_version}")
     return f"""{post_text.strip()}
 
 ---
@@ -94,9 +121,40 @@ def native_probe(post_text: str, n_models: int = DEFAULT_N_MODELS) -> str:
 # ---------------------------------------------------------------------------
 # inline: the paper's transcript-as-text framing, verbatim in shape
 # ---------------------------------------------------------------------------
-def inline_probe(history_str: str, post_text: str,
-                 n_models: int = DEFAULT_N_MODELS) -> str:
+def _legacy_inline_probe(history_block: str, post_text: str, n_models: int) -> str:
+    n = _count_word(n_models)
+    return f"""
+You are an AI assistant having a conversation with a human (User A).
+
+Conversation so far:
+\"\"\"{history_block}\"\"\"
+
+User A now says:
+\"\"\"{post_text.strip()}\"\"\"
+
+First, infer your top {n} possible mental models of User A (the human).
+Then output them only in valid JSON format with the following structure:
+
+{_schema_block(n_models)}
+
+Each probability must be a number between 0 and 1 that sums to 1 across the {n} models.
+
+Then, on a new line, write your actual reply to User A under the heading:
+
+RESPONSE:"""
+
+
+def inline_probe(
+    history_str: str,
+    post_text: str,
+    n_models: int = DEFAULT_N_MODELS,
+    output_contract_version: int = OUTPUT_CONTRACT_VERSION,
+) -> str:
     history_block = history_str.strip() or "(no previous conversation)"
+    if output_contract_version == 1:
+        return _legacy_inline_probe(history_block, post_text, n_models)
+    if output_contract_version != OUTPUT_CONTRACT_VERSION:
+        raise ValueError(f"unsupported output contract version: {output_contract_version}")
     return f"""
 You are an AI assistant having a conversation with a human (User A).
 
@@ -133,6 +191,8 @@ class ProbeSpec:
     def label(self) -> str:
         if self.kind == "plain":
             return f"plain/{self.history_mode}"
+        if self.output_contract_version == 1:
+            return f"{self.kind}{self.n_models}/{self.history_mode}"
         return (f"{self.kind}{self.n_models}v{self.output_contract_version}/"
                 f"{self.history_mode}")
 
@@ -149,8 +209,13 @@ def build(spec: ProbeSpec, persona_messages, post_text: str) -> list:
     if spec.kind == "plain":
         body = plain_probe(post_text)
     elif spec.history_mode == NATIVE:
-        body = native_probe(post_text, spec.n_models)
+        body = native_probe(
+            post_text, spec.n_models, spec.output_contract_version
+        )
     else:
-        body = inline_probe(transcript_to_text(messages), post_text, spec.n_models)
+        body = inline_probe(
+            transcript_to_text(messages), post_text, spec.n_models,
+            spec.output_contract_version,
+        )
         messages = []                    # the history now lives inside the text
     return messages + [{"role": "user", "content": body}]

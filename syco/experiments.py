@@ -55,6 +55,7 @@ class ExperimentProfile:
             kind=self.probe.get("kind", "openended"),
             history_mode=self.probe.get("history_mode", "native"),
             n_models=self.probe.get("n_models", 3),
+            output_contract_version=self.probe.get("output_contract_version", 2),
         )
 
     @property
@@ -63,7 +64,7 @@ class ExperimentProfile:
 
     @property
     def logs_dir(self) -> Path:
-        return _resolve_path(self.output.get("logs_dir"), paths.ROOT / "logs")
+        return _resolve_path(self.output.get("logs_dir"), self.results_dir)
 
     @property
     def merge_dir(self) -> Path:
@@ -82,10 +83,11 @@ class ExperimentProfile:
 
     def output_for(self, spec: ModelSpec) -> Path:
         tag = self.probe_spec.label().replace("/", "-")
-        return self.results_dir / f"{spec.safe_dir_name()}_{tag}.jsonl"
+        return self.results_dir / spec.safe_dir_name() / f"{tag}.jsonl"
 
     def log_for(self, spec: ModelSpec) -> Path:
-        return self.logs_dir / f"{spec.safe_dir_name()}.log"
+        tag = self.probe_spec.label().replace("/", "-")
+        return self.logs_dir / spec.safe_dir_name() / f"{tag}.log"
 
     def merged_output(self) -> Path:
         tag = self.probe_spec.label().replace("/", "-")
@@ -98,6 +100,8 @@ class ExperimentProfile:
             "--probe", self.probe_spec.kind,
             "--history-mode", self.probe_spec.history_mode,
             "--n-models", str(self.probe_spec.n_models),
+            "--output-contract-version",
+            str(self.probe_spec.output_contract_version),
             "--system", str(self.probe.get("system") or ""),
             "--n-reps", str(self.design.get("n_reps", 1)),
             "--seed", str(self.design.get("seed", 1000)),
@@ -188,6 +192,8 @@ def load_profile(name_or_path: str = "default") -> ExperimentProfile:
     if probe.get("history_mode", "native") not in HISTORY_MODES:
         raise ValueError(f"profile history_mode must be one of {HISTORY_MODES}")
     _positive("probe.n_models", probe.get("n_models", 3))
+    if probe.get("output_contract_version", 2) not in {1, 2}:
+        raise ValueError("profile probe.output_contract_version must be 1 or 2")
     _positive("design.n_personas", design.get("n_personas"), allow_none=True)
     _positive("design.n_prompts", design.get("n_prompts"), allow_none=True)
     _positive("design.n_reps", design.get("n_reps", 1))

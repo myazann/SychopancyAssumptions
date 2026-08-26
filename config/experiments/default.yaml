@@ -9,6 +9,7 @@ probe:
   kind: openended
   history_mode: native
   n_models: 3
+  output_contract_version: 2
   system: ""
   thinking: false
 
@@ -29,5 +30,4 @@ execution:
 
 output:
   results_dir: results
-  logs_dir: logs
   merge_dir: results/merged

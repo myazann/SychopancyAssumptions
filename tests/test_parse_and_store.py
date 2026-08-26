@@ -73,6 +73,13 @@ def test_prompt_has_one_versioned_cross_model_output_contract():
     assert ProbeSpec().label() == "openended3v2/native"
 
 
+def test_legacy_contract_keeps_original_prompt_and_label_for_resume():
+    prompt = native_probe("A dilemma", n_models=3, output_contract_version=1)
+    assert "Before you reply, infer your top three possible mental models" in prompt
+    assert "first character of your output" not in prompt
+    assert ProbeSpec(output_contract_version=1).label() == "openended3/native"
+
+
 def test_redundant_model_columns_are_not_in_raw_row_schema():
     columns = {field.name for field in fields(AssumptionRecord)}
     assert not columns.intersection({

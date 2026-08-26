@@ -176,7 +176,7 @@ def parse_args(argv=None):
     p.add_argument("--model", required=True,
                    help="alias from config/models.yaml (see `python -m syco.model_registry`)")
     p.add_argument("--out", default=None,
-                   help="results JSONL (default: results/<alias>_<probe>.jsonl)")
+                   help="results JSONL (default: results/<alias>/<probe>.jsonl)")
 
     g = p.add_argument_group("instrument")
     g.add_argument("--probe", choices=("openended", "plain"), default="openended",
@@ -190,6 +190,14 @@ def parse_args(argv=None):
     g.add_argument("--n-models", type=positive_int,
                    default=probe_prompts.DEFAULT_N_MODELS,
                    help="how many mental models to ask for (paper: 3)")
+    g.add_argument(
+        "--output-contract-version",
+        type=int,
+        choices=(1, probe_prompts.OUTPUT_CONTRACT_VERSION),
+        default=probe_prompts.OUTPUT_CONTRACT_VERSION,
+        help="response contract version (default: 2; use 1 only to resume a "
+             "compatible pilot run)",
+    )
     g.add_argument("--system", default="",
                    help="system prompt, applied to every cell (default: none)")
 
@@ -298,10 +306,17 @@ def main(argv=None) -> int:
     spec = configured_spec(args, registry, resolve_quant=True)
 
     spec_probe = probe_prompts.ProbeSpec(
-        kind=args.probe, history_mode=args.history_mode, n_models=args.n_models)
+        kind=args.probe,
+        history_mode=args.history_mode,
+        n_models=args.n_models,
+        output_contract_version=args.output_contract_version,
+    )
 
-    out = args.out or str(RESULTS_DIR / f"{spec.safe_dir_name()}_"
-                          f"{spec_probe.label().replace('/', '-')}.jsonl")
+    out = args.out or str(
+        RESULTS_DIR
+        / spec.safe_dir_name()
+        / f"{spec_probe.label().replace('/', '-')}.jsonl"
+    )
 
     run_manifest = build_manifest(
         args=args,
