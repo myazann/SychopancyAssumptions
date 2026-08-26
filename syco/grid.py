@@ -45,14 +45,18 @@ class Cell:
                 f"x {self.prompt.prompt_type}/{self.prompt.prompt_id} #{self.rep}")
 
 
-def cell_key(model_alias: str, probe_label: str, cell: Cell) -> str:
+def cell_key(model_alias: str, probe_label: str, cell: Cell,
+             run_id: str = "") -> str:
     """Stable identity of a cell -- the unit of resume.
 
     Includes the probe label, so switching `--history-mode` or the number of
     mental models starts a fresh set of cells in the same file instead of
     silently resuming rows collected under a different instrument.
     """
-    return "|".join(str(p) for p in (model_alias, probe_label, *cell.key_parts))
+    parts = (model_alias, probe_label, *cell.key_parts)
+    if run_id:
+        parts = (run_id, *parts)
+    return "|".join(str(p) for p in parts)
 
 
 def _stable_sample(items: list, n: Optional[int], seed: int, tag: str) -> list:
@@ -81,19 +85,31 @@ def build_cells(
     n_reps: int = 1,
     seed: int = 1000,
     restrict_pairs: Optional[set] = None,
+    restrict_cells: Optional[set] = None,
 ) -> list:
     """Expand the design. Pure -- makes no model calls, so a grid can be planned
     and counted before anything is loaded.
 
-    `restrict_pairs` is a set of (persona_id, prompt_id) that the run is limited
-    to; `--match-existing` fills it from a prior answers table so every
-    assumption row lands beside an answer already collected for that cell.
+    `restrict_cells` is a set of
+    (persona_type, persona_id, prompt_type, prompt_id) coordinates that the run
+    is limited to. `--match-existing` fills it from a prior answers table so an
+    assumption row cannot be generated for a facet or framing that has no
+    corresponding existing answer.
+
+    `restrict_pairs` is retained for compatibility with older callers. It has
+    the weaker (persona_id, prompt_id) semantics and should not be used for new
+    matching workflows.
     """
+    if restrict_pairs is not None and restrict_cells is not None:
+        raise ValueError("pass only one of restrict_pairs or restrict_cells")
     by_type: dict = {}
     for p in personas:
         by_type.setdefault(p.persona_type, {})[p.persona_id] = p
 
-    types = [t for t in (persona_types or sorted(by_type)) if t in by_type]
+    # Preserve the source table's facet order. Sorting put the legitimate
+    # `assumptions` facet first and made a partial run look as if every persona
+    # had been mislabeled as that one facet.
+    types = [t for t in (persona_types or list(by_type)) if t in by_type]
     if persona_types:
         missing = [t for t in persona_types if t not in by_type]
         if missing:
@@ -103,7 +119,9 @@ def build_cells(
     # Only people present in EVERY selected facet are eligible, so the
     # trait contrast never compares different sets of people.
     complete = set.intersection(*(set(by_type[t]) for t in types)) if types else set()
-    if restrict_pairs is not None:
+    if restrict_cells is not None:
+        complete &= {pid for _, pid, _, _ in restrict_cells if pid != NO_PERSONA}
+    elif restrict_pairs is not None:
         complete &= {pid for pid, _ in restrict_pairs}
     persona_ids = sorted(complete)
     persona_ids = _stable_sample(persona_ids, n_persona_ids, seed, "persona")
@@ -117,24 +135,43 @@ def build_cells(
     want_framings = [t for t in (prompt_types or (ORIGINAL, FLIPPED))]
     eligible = [pid for pid, framings in by_prompt.items()
                 if all(f in framings for f in want_framings)]
-    if restrict_pairs is not None:
+    if restrict_cells is not None:
+        eligible = [pid for pid in eligible if pid in {q for _, _, _, q in restrict_cells}]
+    elif restrict_pairs is not None:
         eligible = [pid for pid in eligible if pid in {q for _, q in restrict_pairs}]
     prompt_ids = _stable_sample(sorted(eligible), n_prompt_ids, seed, "prompt")
 
     cells = []
-    persona_rows = [(t, by_type[t][pid]) for t in types for pid in persona_ids]
+    # Interleave facets within each person/dilemma instead of writing one giant
+    # facet block at a time. The full grid is unchanged, but a pilot, --limit
+    # run, or snapshot of an in-progress run now covers all persona facets.
+    persona_groups = []
     if include_no_persona:
-        persona_rows.append((NO_PERSONA, CONTROL_PERSONA))
+        persona_groups.append([CONTROL_PERSONA])
+    persona_groups.extend(
+        [by_type[t][pid] for t in types]
+        for pid in persona_ids
+    )
 
-    for _, persona in persona_rows:
-        for prompt_id in prompt_ids:
-            for framing in want_framings:
-                if restrict_pairs is not None and not persona.is_control:
-                    if (persona.persona_id, prompt_id) not in restrict_pairs:
-                        continue
-                prompt = by_prompt[prompt_id][framing]
-                for rep in range(n_reps):
-                    cells.append(Cell(persona=persona, prompt=prompt, rep=rep))
+    for prompt_id in prompt_ids:
+        for framing in want_framings:
+            for personas_for_cell in persona_groups:
+                for persona in personas_for_cell:
+                    if restrict_cells is not None:
+                        coordinate = (
+                            persona.persona_type,
+                            persona.persona_id,
+                            framing,
+                            prompt_id,
+                        )
+                        if coordinate not in restrict_cells:
+                            continue
+                    elif restrict_pairs is not None and not persona.is_control:
+                        if (persona.persona_id, prompt_id) not in restrict_pairs:
+                            continue
+                    prompt = by_prompt[prompt_id][framing]
+                    for rep in range(n_reps):
+                        cells.append(Cell(persona=persona, prompt=prompt, rep=rep))
     return cells
 
 
@@ -145,6 +182,24 @@ def pairs_from_answers(df, persona_types: Optional[list] = None) -> set:
         sub = sub[sub["persona_type"].isin(list(persona_types) + [NO_PERSONA])]
     return {(str(a), str(b)) for a, b in zip(sub["persona_id"], sub["prompt_id"])
             if str(a) != NO_PERSONA}
+
+
+def cells_from_answers(df, persona_types: Optional[list] = None) -> set:
+    """Full design coordinates covered by a prior answers table."""
+    required = {"persona_type", "persona_id", "prompt_type", "prompt_id"}
+    missing = sorted(required - set(df.columns))
+    if missing:
+        raise ValueError(f"Existing answers table is missing columns: {missing}")
+    sub = df
+    if persona_types:
+        sub = sub[sub["persona_type"].isin(list(persona_types) + [NO_PERSONA])]
+    return {
+        (str(ptype), str(pid), str(qtype), str(qid))
+        for ptype, pid, qtype, qid in zip(
+            sub["persona_type"], sub["persona_id"],
+            sub["prompt_type"], sub["prompt_id"],
+        )
+    }
 
 
 def summarize(cells: list) -> str:

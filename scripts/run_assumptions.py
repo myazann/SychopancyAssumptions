@@ -12,25 +12,25 @@ Examples
 --------
 Plan a run without loading a model (no weights, no keys, no cost):
 
-    python scripts/run_assumptions.py --model Gemma3-12B --plan-only \
+    python -m syco run --model Gemma3-12B --plan-only \
         --n-personas 20 --n-prompts 25
 
 Exercise the whole pipeline offline, including the parser:
 
-    python scripts/run_assumptions.py --model Gemma3-12B --dry-run \
+    python -m syco run --model Gemma3-12B --dry-run \
         --n-personas 2 --n-prompts 2 --out results/smoke.jsonl
 
 Collect assumptions for cells the existing answers table already covers, so
 every assumption row sits beside an answer from the same model:
 
-    python scripts/run_assumptions.py --model Gemma3-12B \
+    python -m syco run --model Gemma3-12B \
         --match-existing files/gemma-3-12b-it_long_results.pkl \
         --n-personas 25 --n-prompts 20 \
         --out results/gemma3-12b_openended.jsonl
 
 The paper's own framing, as a robustness check on the same cells:
 
-    python scripts/run_assumptions.py --model Gemma3-12B --history-mode inline \
+    python -m syco run --model Gemma3-12B --history-mode inline \
         --out results/gemma3-12b_openended_inline.jsonl
 
 Runs resume by default: re-running the same command with the same --out picks
@@ -45,12 +45,15 @@ import signal
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from syco import grid, prompts as probe_prompts
+from syco import grid
+from syco import prompts as probe_prompts
 from syco.data import load_answers, load_personas, load_prompts
-from syco.model_registry import load_registry
+from syco.manifest import build_manifest, ensure_manifest, manifest_path
+from syco.model_registry import ANTHROPIC_BACKEND, load_registry
 from syco.models import Conversation, build_adapter
 from syco.paths import RESULTS_DIR
 from syco.store import AssumptionRecord, append, completed_keys
@@ -96,7 +99,32 @@ def build_conversation(cell, spec_probe, system: str) -> Conversation:
     return Conversation(messages=tuple(messages), system=system)
 
 
-def make_record(cell, spec, spec_probe, plan, key, raw: str, conv, error: str = "") -> AssumptionRecord:
+def make_record(
+    cell,
+    spec,
+    spec_probe,
+    plan,
+    key,
+    raw: str,
+    conv,
+    run_id: str,
+    error: str = "",
+    backend_override: str | None = None,
+) -> AssumptionRecord:
+    provenance = spec.provenance()
+    thinking_type = (plan.kwargs.get("thinking") or {}).get("type")
+    if spec.backend == ANTHROPIC_BACKEND and thinking_type in {"adaptive", "enabled"}:
+        provenance["temperature"] = None
+    if backend_override == "mock":
+        provenance.update(temperature=None, top_p=None)
+    # These values are constant for a per-model run and already live in the
+    # adjacent manifest. Repeating them in every row wastes space and obscures
+    # the actual design and observation columns.
+    for column in (
+        "model_id", "model_family", "model_generation", "model_release_date",
+        "backend", "quantized_file",
+    ):
+        provenance.pop(column, None)
     return AssumptionRecord(
         cell_key=key,
         persona_type=cell.persona.persona_type,
@@ -115,8 +143,30 @@ def make_record(cell, spec, spec_probe, plan, key, raw: str, conv, error: str = 
         prompt_digest=conv.digest(),
         error=error,
         timestamp=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
-        **spec.provenance(),
+        run_id=run_id,
+        **provenance,
     )
+
+
+def positive_int(value: str) -> int:
+    number = int(value)
+    if number <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return number
+
+
+def nonnegative_float(value: str) -> float:
+    number = float(value)
+    if number < 0:
+        raise argparse.ArgumentTypeError("must be zero or greater")
+    return number
+
+
+def probability(value: str) -> float:
+    number = float(value)
+    if not 0 <= number <= 1:
+        raise argparse.ArgumentTypeError("must be between 0 and 1")
+    return number
 
 
 def parse_args(argv=None):
@@ -137,7 +187,8 @@ def parse_args(argv=None):
                    help="native: persona as real chat turns (default, matches how "
                         "the answers table was collected). inline: the paper's "
                         "transcript-in-one-message framing")
-    g.add_argument("--n-models", type=int, default=probe_prompts.DEFAULT_N_MODELS,
+    g.add_argument("--n-models", type=positive_int,
+                   default=probe_prompts.DEFAULT_N_MODELS,
                    help="how many mental models to ask for (paper: 3)")
     g.add_argument("--system", default="",
                    help="system prompt, applied to every cell (default: none)")
@@ -146,41 +197,45 @@ def parse_args(argv=None):
     g.add_argument("--persona-types", nargs="*", default=None,
                    help="facets to include (default: all ten)")
     g.add_argument("--prompt-types", nargs="*", default=None,
+                   choices=("original_post", "flipped_story"),
                    help="framings to include (default: original_post flipped_story)")
-    g.add_argument("--n-personas", type=int, default=None,
+    g.add_argument("--n-personas", type=positive_int, default=None,
                    help="people to sample; the SAME people appear in every facet")
-    g.add_argument("--n-prompts", type=int, default=None,
+    g.add_argument("--n-prompts", type=positive_int, default=None,
                    help="dilemmas to sample; both framings of each are kept")
-    g.add_argument("--n-reps", type=int, default=1,
+    g.add_argument("--n-reps", type=positive_int, default=1,
                    help="draws per cell (>1 measures within-cell variance)")
     g.add_argument("--no-control", action="store_true",
                    help="drop the persona-free control cells")
     g.add_argument("--match-existing", default=None,
-                   help="restrict to (persona_id, prompt_id) pairs in a prior "
-                        "answers table, e.g. files/gemma-3-12b-it_long_results.pkl")
+                   help="restrict to exact persona/facet/framing/dilemma cells "
+                        "in a prior answers table, e.g. "
+                        "files/gemma-3-12b-it_long_results.pkl")
     g.add_argument("--seed", type=int, default=1000,
                    help="sampling seed; the same seed gives the same subset")
 
     g = p.add_argument_group("execution")
-    g.add_argument("--limit", type=int, default=None, help="stop after N cells")
-    g.add_argument("--batch-size", type=int, default=None,
+    g.add_argument("--limit", type=positive_int, default=None, help="stop after N cells")
+    g.add_argument("--batch-size", type=positive_int, default=None,
                    help="local backends: prompts per generate() call")
-    g.add_argument("--max-workers", type=int, default=None,
+    g.add_argument("--max-workers", type=positive_int, default=None,
                    help="API backends: concurrent requests")
     g.add_argument("--device", default=None,
                    help="hf backend: override device_map (cuda | cpu | mps | auto). "
                         "mps is never chosen automatically -- Apple's backend "
                         "returns NaN logits for left-padded batches, so pair it "
                         "with --batch-size 1")
-    g.add_argument("--temperature", type=float, default=None)
-    g.add_argument("--top-p", type=float, default=None)
-    g.add_argument("--max-tokens", type=int, default=None,
+    g.add_argument("--temperature", type=nonnegative_float, default=None)
+    g.add_argument("--top-p", type=probability, default=None)
+    g.add_argument("--max-tokens", type=positive_int, default=None,
                    help="output budget per cell (must fit the JSON block AND the reply)")
     g.add_argument("--thinking", action="store_true",
                    help="let the model reason before answering (default: asserted "
                         "off, so the verbalized block is the only reasoning shown)")
     g.add_argument("--no-resume", action="store_true",
-                   help="ignore rows already in --out")
+                   help="require an empty/new --out instead of resuming")
+    g.add_argument("--overwrite", action="store_true",
+                   help="replace --out and its manifest before running")
     g.add_argument("--plan-only", action="store_true",
                    help="print the grid and exit, loading nothing")
     g.add_argument("--dry-run", action="store_true",
@@ -188,9 +243,48 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
+def configured_spec(args, registry, *, resolve_quant: bool = False):
+    """Apply CLI generation/runtime overrides exactly once.
+
+    Orchestration uses the same function to compute the manifest expected for
+    the current profile, preventing validation logic from drifting away from
+    the actual runner.
+    """
+    from dataclasses import replace
+
+    spec = registry.get(args.model)
+    overrides = {
+        key: value
+        for key, value in (
+            ("temperature", args.temperature),
+            ("top_p", args.top_p),
+            ("max_output_tokens", args.max_tokens),
+            ("batch_size", args.batch_size),
+            ("max_workers", args.max_workers),
+        )
+        if value is not None
+    }
+    if overrides:
+        spec = replace(spec, **overrides)
+    if args.device:
+        spec = replace(spec, runtime={**spec.runtime, "device_map": args.device})
+    if (
+        resolve_quant
+        and spec.quantization.format == "gguf"
+        and not args.dry_run
+        and not args.plan_only
+    ):
+        spec = registry.with_resolved_quant(spec)
+    return spec
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
-    from dataclasses import replace
+
+    if args.overwrite and args.no_resume:
+        raise SystemExit("--overwrite and --no-resume are mutually exclusive")
+    if args.overwrite and args.plan_only:
+        raise SystemExit("--overwrite cannot be used with --plan-only")
 
     # Line-buffer stdout: a run of this length is normally redirected to a log,
     # and Python block-buffers a redirected stream, so progress would sit
@@ -201,16 +295,7 @@ def main(argv=None) -> int:
         pass
 
     registry = load_registry()
-    spec = registry.get(args.model)
-    overrides = {k: v for k, v in (
-        ("temperature", args.temperature), ("top_p", args.top_p),
-        ("max_output_tokens", args.max_tokens), ("batch_size", args.batch_size),
-        ("max_workers", args.max_workers),
-    ) if v is not None}
-    if overrides:
-        spec = replace(spec, **overrides)
-    if args.device:
-        spec = replace(spec, runtime={**spec.runtime, "device_map": args.device})
+    spec = configured_spec(args, registry, resolve_quant=True)
 
     spec_probe = probe_prompts.ProbeSpec(
         kind=args.probe, history_mode=args.history_mode, n_models=args.n_models)
@@ -218,14 +303,22 @@ def main(argv=None) -> int:
     out = args.out or str(RESULTS_DIR / f"{spec.safe_dir_name()}_"
                           f"{spec_probe.label().replace('/', '-')}.jsonl")
 
+    run_manifest = build_manifest(
+        args=args,
+        spec=spec,
+        probe=spec_probe,
+        resolved_file=spec.quantization.resolved_file,
+    )
+    run_id = run_manifest["run_id"]
+
     # -- the grid ----------------------------------------------------------
     personas, diag = load_personas()
     dilemmas = load_prompts()
     restrict = None
     if args.match_existing:
         answers = load_answers(args.match_existing)
-        restrict = grid.pairs_from_answers(answers, args.persona_types)
-        print(f"matching {len(restrict)} (persona, dilemma) pairs from "
+        restrict = grid.cells_from_answers(answers, args.persona_types)
+        print(f"matching {len(restrict)} full design cell(s) from "
               f"{args.match_existing}")
 
     cells = grid.build_cells(
@@ -237,12 +330,13 @@ def main(argv=None) -> int:
         include_no_persona=not args.no_control,
         n_reps=args.n_reps,
         seed=args.seed,
-        restrict_pairs=restrict,
+        restrict_cells=restrict,
     )
 
     print(f"model:   {spec.alias}  ({spec.backend}, {spec.quantization.label}, "
           f"T={spec.temperature}, top_p={spec.top_p}, max_tokens={spec.max_output_tokens})")
     print(f"probe:   {spec_probe.label()}")
+    print(f"run:     {run_id}")
     print(grid.summarize(cells))
     unusable = int((~diag.usable).sum()) if len(diag) else 0
     recovered = int(diag.recovered.sum()) if len(diag) else 0
@@ -252,8 +346,29 @@ def main(argv=None) -> int:
         print(f"note:    {recovered} transcript(s) needed salvage parsing -- "
               "flagged per row as persona_recovered")
 
+    output_path = Path(out)
+    if not args.plan_only:
+        has_output = output_path.is_file() and output_path.stat().st_size > 0
+        if args.no_resume and has_output:
+            print(f"error: --no-resume requires a new or empty --out: {out}",
+                  file=sys.stderr)
+            return 2
+        if args.overwrite:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text("", encoding="utf-8")
+            manifest_path(out).unlink(missing_ok=True)
+            has_output = False
+        try:
+            ensure_manifest(out, run_manifest, has_output=has_output)
+        except RuntimeError as err:
+            print(f"error: {err}", file=sys.stderr)
+            return 2
+
     done = set() if args.no_resume else completed_keys(out)
-    todo = [c for c in cells if grid.cell_key(spec.alias, spec_probe.label(), c) not in done]
+    todo = [
+        c for c in cells
+        if grid.cell_key(spec.alias, spec_probe.label(), c, run_id) not in done
+    ]
     if done:
         print(f"resume:  {len(cells) - len(todo)} of {len(cells)} cells already in {out}")
     if args.limit:
@@ -285,7 +400,6 @@ def main(argv=None) -> int:
               f"| errors={errors}", flush=True)
 
     if spec.quantization.format == "gguf" and not args.dry_run:
-        spec = registry.with_resolved_quant(spec)
         print(f"quant file: {spec.quantization.resolved_file}")
 
     with build_adapter(spec, dry_run=args.dry_run) as adapter:
@@ -296,14 +410,34 @@ def main(argv=None) -> int:
         def run_one(cell):
             """-> (record). Never raises: a failed cell is a row with an error,
             so the run continues and that cell is retried next time."""
-            key = grid.cell_key(spec.alias, spec_probe.label(), cell)
+            key = grid.cell_key(spec.alias, spec_probe.label(), cell, run_id)
             conv = build_conversation(cell, spec_probe, args.system)
             try:
                 raw = adapter.chat(conv, n=1, plan=plan)[0]
-                return make_record(cell, spec, spec_probe, plan, key, raw, conv)
+                return make_record(
+                    cell,
+                    spec,
+                    spec_probe,
+                    plan,
+                    key,
+                    raw,
+                    conv,
+                    run_id,
+                    backend_override="mock" if args.dry_run else None,
+                )
             except Exception as err:
-                return make_record(cell, spec, spec_probe, plan, key, "", conv,
-                                   error=f"{type(err).__name__}: {err}")
+                return make_record(
+                    cell,
+                    spec,
+                    spec_probe,
+                    plan,
+                    key,
+                    "",
+                    conv,
+                    run_id,
+                    error=f"{type(err).__name__}: {err}",
+                    backend_override="mock" if args.dry_run else None,
+                )
 
         if spec.is_api:
             # API: concurrency is the throughput lever, and the provider is the
@@ -325,7 +459,10 @@ def main(argv=None) -> int:
             ordered = sorted(todo, key=lambda c: (len(c.prompt.text), c.persona.n_turns))
             for start in range(0, len(ordered), spec.batch_size):
                 chunk = ordered[start:start + spec.batch_size]
-                keys = [grid.cell_key(spec.alias, spec_probe.label(), c) for c in chunk]
+                keys = [
+                    grid.cell_key(spec.alias, spec_probe.label(), c, run_id)
+                    for c in chunk
+                ]
                 convs = [build_conversation(c, spec_probe, args.system) for c in chunk]
                 try:
                     raws = adapter.chat_batch(convs, plan=plan)
@@ -335,8 +472,18 @@ def main(argv=None) -> int:
                     err = f"{type(e).__name__}: {e}"
                     print(f"  [batch error] {err}", flush=True)
                 for cell, key, conv, raw in zip(chunk, keys, convs, raws):
-                    buffer.append(make_record(cell, spec, spec_probe, plan, key,
-                                              raw, conv, error=err))
+                    buffer.append(make_record(
+                        cell,
+                        spec,
+                        spec_probe,
+                        plan,
+                        key,
+                        raw,
+                        conv,
+                        run_id,
+                        error=err,
+                        backend_override="mock" if args.dry_run else None,
+                    ))
                 written += len(chunk)
                 errors += len(chunk) if err else 0
                 flush()
@@ -361,8 +508,8 @@ def main(argv=None) -> int:
           f"({errors} error(s)) -> {out}")
     if killer.stop:
         print("stopped early -- re-run the same command to continue.")
-    print(f"next: python scripts/parse_assumptions.py {out}")
-    return 0
+    print(f"next: python -m syco parse {out}")
+    return 1 if errors else 0
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # Open-ended verbalized assumptions
 
-Runs the open-ended assumptions probe from Chen et al., *Verbalizing LLMs'
+Runs the open-ended assumptions probe from Cheng et al., *Verbalizing LLMs'
 assumptions to explain and control sycophancy* (vendored under
 [verbalizedassumptions/](verbalizedassumptions/)) over this repo's persona x
 dilemma design, through the model layer from
@@ -21,7 +21,7 @@ how that moves, is the measurement.
 
 | factor | levels | source |
 |---|---|---|
-| `persona_type` | 10 facets (hobbies, politics, family, …) + no-persona control | `files/base_data_persona.gz` |
+| `persona_type` | 10 facets (`hobbies`, `motivation`, `recognition`, `life_story`, `crossroads`, `family`, `influence`, `setback`, `politics`, `assumptions`) + no-persona control | `files/base_data_persona.gz` |
 | `persona_id` | 200 synthetic people, each appearing once per facet | same |
 | `prompt_type` | `original_post`, `flipped_story` — the same dilemma from either side | `files/base_data_prompt.gz` |
 | `prompt_id` | 1000 dilemmas | same |
@@ -31,6 +31,13 @@ always **paired**: personas and dilemmas are drawn once, then crossed with all
 the levels. Both contrasts stay within-subject that way. Sampling independently
 per condition would confound the contrast with whichever personas happened to be
 drawn, and nothing downstream recovers from that.
+
+Cells are emitted in source-table facet order and interleaved within each
+person/dilemma. The `assumptions` value is a real source facet (what the person
+says others assume about them), not the extracted mental models. Earlier pilot
+runs processed a whole alphabetically sorted facet at once, so a live snapshot
+misleadingly contained only `persona_type=assumptions`; partial runs now cover
+every facet.
 
 ## Two ways to send the conversation
 
@@ -47,35 +54,58 @@ drawn, and nothing downstream recovers from that.
 ## Run it
 
 ```bash
-pip install -r requirements.txt
-python -m syco.model_registry          # what's configured, and how each is served
+# Install first; see README.md for virtualenv and CUDA details.
+python -m pip install -r requirements.txt
+python -m syco models                  # what's configured, and how each is served
+python -m syco doctor                  # dependencies, data, profile, and GPUs
+python -m syco smoke                   # offline end-to-end pipeline
+python -m syco plan                    # all enabled models, no weights or API calls
+
+# Schedule the default profile across the available NVIDIA GPUs.
+python -m syco run --all
+python -m syco status
+python -m syco merge
+python -m syco parse --all
+python -m syco summarize --all
+python -m syco topics --all
 
 # plan a run — no weights, no keys, no cost
-python scripts/run_assumptions.py --model Gemma3-12B --plan-only \
+python -m syco run --model Gemma3-12B --plan-only \
     --n-personas 20 --n-prompts 25
 
 # exercise the whole pipeline offline against the mock backend
-python scripts/run_assumptions.py --model Gemma3-12B --dry-run \
+python -m syco run --model Gemma3-12B --dry-run \
     --n-personas 2 --n-prompts 2 --out results/smoke.jsonl
 
 # the real thing, on cells the existing answers table already covers
-python scripts/run_assumptions.py --model Gemma3-12B \
+python -m syco run --model Gemma3-12B \
     --match-existing files/gemma-3-12b-it_long_results.pkl \
     --n-personas 25 --n-prompts 20 \
     --out results/gemma3-12b_openended.jsonl
 
-python scripts/parse_assumptions.py    results/gemma3-12b_openended.jsonl
-python scripts/summarize_assumptions.py results/gemma3-12b_openended_assumptions.parquet
+python -m syco parse     results/gemma3-12b_openended.jsonl
+python -m syco summarize results/gemma3-12b_openended_assumptions.parquet
+python -m syco topics    results/gemma3-12b_openended_assumptions.parquet
 ```
 
-Runs resume by default — re-run the same command with the same `--out`. Rows
-that recorded an error are retried; a truncated final line from a killed run is
-ignored. Ctrl-C once finishes the batch in flight and flushes.
+`requirements.txt` lists its runtime packages explicitly. See README.md for
+virtual-environment setup, the CUDA-enabled `llama-cpp-python` build, developer
+requirements, and optional Transformers dependencies. `python -m syco doctor`
+verifies imports but cannot determine whether llama.cpp was compiled with CUDA.
+
+Runs resume by default — re-run the same command with the same `--out`. Every
+JSONL has an adjacent `.manifest.json` carrying an immutable `run_id`; changing
+the model, data, code, prompt, design, decoding, or thinking setting requires a
+new output path instead of silently mixing experiments. Rows that recorded an
+error are retried, and parsing keeps the latest successful attempt per cell.
+A truncated final line from a killed run is ignored. Ctrl-C once finishes the
+batch in flight and flushes. `--no-resume` now requires a new/empty output;
+`--overwrite` explicitly replaces an existing output and manifest.
 
 `--match-existing` is the flag that matters for comparing against work already
-done: it restricts the grid to the `(persona_id, prompt_id)` pairs a prior
-answers table covers, so every assumption row lands beside an answer from the
-same model on the same cell.
+done: it restricts the grid to full `(persona_type, persona_id, prompt_type,
+prompt_id)` coordinates, so every assumption row lands beside an answer from
+the same model on the exact same cell.
 
 ## Adding a model
 
@@ -92,25 +122,177 @@ a time, since its KV cache is shared state.
 
 ## Output
 
-`run_assumptions.py` writes JSONL, one row per cell, holding the completion
-**verbatim** plus the design columns and full model provenance. Parsing is a
-separate step so a parser fix is a re-parse, not a re-run.
+The prompt now uses one explicit, versioned output contract across all model
+families: the completion must begin with one bare JSON object, contain exactly
+the requested number of mental models, and put the actual answer after a literal
+`RESPONSE:` line. The version appears in the probe label, for example
+`openended3v2/native`, so runs made with the earlier pilot wording cannot be
+pooled silently.
 
-`parse_assumptions.py` writes two tables and prints the instrument's health
-check. Read that first: `clean` / `repaired` / `salvaged` / `failed` per persona
-facet. A facet that parses worse than the others differs in format compliance,
-and that difference will masquerade as a finding in everything downstream.
+Compliance is not the only protection. The parser also handles preambles,
+Markdown fences/headings, trailing commas, string/percentage probabilities,
+common alternate JSON keys, truncated JSON entries, and numbered Markdown
+field lists. Every repair is retained in `parse_status`/`parse_notes`; an output
+with the wrong number of assumptions is extracted but explicitly flagged.
+
+### Why there are both JSONL and Parquet files
+
+They have different roles and are not two competing sources of truth:
+
+- The raw `.jsonl` is the canonical acquisition log: one append-safe row per
+  response, with the completion in `raw`. It is what makes interruption/resume
+  safe and lets a better parser recover old generations without another model
+  run. Full model identity and serving provenance live in its adjacent
+  `.manifest.json`; compact row-level audit fields are retained, but `model_id`,
+  `model_family`, `model_generation`, `model_release_date`, `backend`, and
+  `quantized_file` are not repeated on every new row.
+- `*_assumptions.parquet` is a derived analysis table: one row per extracted
+  assumption, including `assumption`, `description`, `probability`, normalized
+  probability, design coordinates, and parse status. Parquet preserves types,
+  compresses well, and is efficient for grouping and topic analysis.
+
+Do not copy parsed assumptions back into the raw JSONL: doing so would duplicate
+data and leave stale extractions after parser improvements. Keep raw JSONL plus
+its manifest for reproducibility and the Parquet while analyzing; the Parquet
+can always be deleted and regenerated with `python -m syco parse`. Use
+`--format csv|json|jsonl` only when a human-readable derived table is more useful
+than Parquet.
+
+`parse_assumptions.py` also prints the instrument's health check. Read that
+first: `clean` / `repaired` / `salvaged` / `failed` per persona facet. A facet
+that parses noticeably worse than the others differs in format compliance, and
+that difference will masquerade as a finding in everything downstream.
+
+## What the assumptions are about
+
+`summarize_assumptions.py` counts assumption labels as exact strings, so
+"wants validation" and "seeking validation" are two rows. `topic_assumptions.py`
+is the content pass that looks through the wording, following the paper's own
+three-part characterization: unigram frequency, bigram frequency, and BERTopic
+over sentence-transformer embeddings with each topic labeled by an LLM from its
+top words.
+
+```bash
+python -m syco topics results/gemma3-12b_openended_assumptions.parquet
+
+# the label and its description together, and name the topics with a model
+python -m syco topics results/gemma3-12b_openended_assumptions.parquet \
+    --field both --label-model GPT-5.6
+
+# n-grams only — no optional dependencies
+python -m syco topics results/gemma3-12b_openended_assumptions.parquet --no-topics
+```
+
+**Two denominators, and the paper quotes each quantity against a different
+one.** A word share is per *assumption* — k rows per response, so a response
+with k=3 gives the word three chances to appear ("validation occurs in 26% of
+the assumptions"). A bigram share is per *response*, counted once however many
+of its assumptions contain it ("Seeking validation [...] occurring in 12-16% of
+the responses"). The two differ by roughly k, so both are on every row here
+rather than one being picked silently.
+
+Unigrams drop function words and bigrams keep them. That asymmetry is the
+paper's: its bigram table reports "rather than" and "may have", which a
+stopword filter destroys. `--stopwords all|none` overrides it.
+
+**One topic model per input, not per facet.** The paper fits one per dataset;
+this study has one dilemma set and varies the persona facet instead, so the
+facets are compared *within* a shared topic space. Fitting per facet would give
+each facet its own topics and nothing to compare against — and comparing
+facets is the whole design. For the same reason every table carries lift
+against the persona-free control: the paper asks what models assume, this
+design asks what *disclosing a facet* changes about what they assume.
+
+`--device` defaults to `auto`: it takes a GPU when `nvidia-smi` reports one
+with real headroom and falls back to CPU when the cards are busy, so running
+`topics` while a generation run holds both GPUs does not fight it for VRAM. The
+free-memory check goes through the same helper the scheduler uses, and it reads
+`nvidia-smi` rather than torch precisely so that asking the question does not
+itself open a CUDA context on a card the analysis then declines to use.
+
+**The device is part of the run's identity, not just its speed.** On one
+device the fit is exactly reproducible — refitting this repo's Gemma table at
+the same seed gave bit-identical assignments, CPU→CPU and GPU→GPU alike. Across
+devices it is not: CPU and CUDA kernels differ in the last bits of the
+embedding, UMAP and HDBSCAN amplify that, and the same table at the same seed
+came out as 33 topics on CPU against 36 on GPU, adjusted Rand 0.50. The broad
+structure survives; the exact partition does not.
+
+So `--seed` alone does not pin a topic table — `--seed` plus `--device` does.
+The resolved device is printed with the table and stored in the fit's `params`,
+and `auto` says out loud what it picked. Pin `--device cpu` (or an explicit
+`cuda:N`) for a table that has to reproduce on another machine; leave it on
+`auto` for exploration.
+
+`--threads` (default 4) caps every BLAS/OpenMP pool and is not just a speed
+knob: torch, OpenBLAS and numba each size their pool to every core, which on a
+login session capped at 1024 pids is enough to kill the process on
+`pthread_create` while the generation runs hold most of them.
+
+`--seed` is threaded into UMAP's `random_state`; without it BERTopic is not
+reproducible between two runs of the same command. Assumptions BERTopic could
+not place stay in topic `-1` and are reported as `outliers` rather than
+reassigned — reassigning them silently turns "no coherent topic" into a topic
+membership. `--reduce-outliers` opts into it.
+
+Topic labeling takes any alias from `config/models.yaml` (`--label-model`); the
+paper uses GPT-4o. It is off by default because it costs a key and a call, and
+the model that wrote the labels is recorded in the table, because the labels
+are data. `--label-dry-run` routes it to the mock backend.
+
+Writes `*_ngrams.parquet`, `*_topics.parquet`, `*_topic_shares.parquet`, and
+`*_topic_assignments.parquet` next to the input. The assignments table carries
+the design coordinates, so a topic can be joined back to any later per-cell
+measure.
+
+The topic model needs `bertopic` and `sentence-transformers`, both in
+`requirements.txt`. On a machine where they are not installed the n-gram tables
+still print and the topic tables are skipped with the install line;
+`python -m syco doctor` reports which state you are in. What it does
+*not* do is group the labels themselves — `summarize`'s frequency tables still
+key on the normalized string, and reconciling the two groupings is a separate
+decision.
 
 ## What's deliberately not here
 
-- **Grouping the assumption labels.** They are free text, currently grouped by
-  normalized string, so near-synonyms ("wants validation" / "seeking
-  validation") sit in separate rows. Clustering or embedding them is the next
-  step and a consequential one — how the labels are grouped decides what the
-  frequency tables say.
 - **Sycophancy scoring of the replies.** The paper's 5-point social sycophancy
   judge is at `verbalizedassumptions/elephant_scorer_5pointscale.py`; the parsed
   `response` column (`--keep-response`) is what it would score.
 - **The other probes.** `get_assumptions.py` also has `4dims`, `supporttypes`
   and two-step variants. `syco/prompts.py` is where they would go — the runner
   takes whatever `ProbeSpec` builds.
+
+## Experiment profiles and orchestration
+
+`config/experiments/default.yaml` owns the probe and design. Its `models:
+enabled` selector is resolved from `config/models.yaml`; aliases are not copied
+into shell. Per-model `resources.estimated_vram_mib` values also live in the
+model registry. The Python scheduler uses `sys.executable`, polls child
+processes directly, reaps them immediately, reports GPU-memory waits, supports
+`--wait-timeout`, and locks a profile against concurrent writers.
+
+Useful operations:
+
+```bash
+python -m syco run --all --limit-per-model 500
+python -m syco status --profile default
+python -m syco merge --allow-partial       # explicit exploratory partial merge
+python -m syco pipeline                    # run, strict merge, parse, summarize
+```
+
+API models use the same single-model command. The adapters read credentials
+from the provider-standard environment variables and never accept keys as CLI
+arguments:
+
+```bash
+OPENAI_API_KEY=... python -m syco run --model GPT-5.6 --n-personas 1 --n-prompts 1
+ANTHROPIC_API_KEY=... python -m syco run --model Claude-Sonnet-5 \
+    --n-personas 1 --n-prompts 1
+```
+
+GPT-5.6 uses OpenAI's Responses API with `reasoning.effort` and
+`max_output_tokens`; unsupported `temperature`/`top_p` fields are omitted.
+Claude Sonnet 5 uses explicit disabled thinking with low output effort for the
+study's default thinking-off condition and likewise omits unsupported sampling
+fields. Provider 4xx validation/authentication errors fail immediately, while
+rate limits, timeouts, and server errors remain retryable.

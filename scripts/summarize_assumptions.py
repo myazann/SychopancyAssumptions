@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """First-pass descriptives on a parsed assumptions run.
 
-    python scripts/summarize_assumptions.py results/gemma3-12b_openended_assumptions.parquet
+    python -m syco summarize results/gemma3-12b_openended_assumptions.parquet
 
 Four tables, each aimed at one of the questions the design was built for:
 
@@ -34,8 +34,6 @@ from __future__ import annotations
 import argparse
 import math
 import os
-import pathlib
-import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -43,22 +41,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pandas as pd
 
 from syco.data import NO_PERSONA
-
-# A cell's identity in the lean results table, which carries no cell_key.
-CELL_KEYS = ("persona_type", "persona_id", "prompt_type", "prompt_id", "rep")
-
-_STRIP_RE = re.compile(r"[^a-z0-9 ]+")
-_LEAD_RE = re.compile(r"^(the\s+)?(user|person|they|he|she)\s+(is|wants|seeks|needs)\s+")
-
-
-def normalize_label(text) -> str:
-    """Group trivially-different labels. Deliberately shallow -- it collapses
-    case, punctuation and a leading 'the user is', and nothing else."""
-    if not isinstance(text, str):
-        return ""
-    text = _STRIP_RE.sub(" ", text.lower()).strip()
-    text = _LEAD_RE.sub("", text)
-    return re.sub(r"\s+", " ", text).strip()
+from syco.tables import (  # noqa: F401  -- re-exported for existing importers
+    CELL_KEYS,
+    READERS,
+    cell_keys,
+    load,
+    model_dimensions,
+    normalize_label,
+)
 
 
 def entropy(probs) -> float:
@@ -66,36 +56,10 @@ def entropy(probs) -> float:
     return -sum(p * math.log(p, 2) for p in probs) if probs else float("nan")
 
 
-# Every format parse_assumptions.py can write, read back by extension.
-READERS = {
-    ".parquet": pd.read_parquet,
-    ".csv": pd.read_csv,
-    ".json": pd.read_json,
-    ".jsonl": lambda p: pd.read_json(p, lines=True),
-}
-
-
-def load(path) -> pd.DataFrame:
-    suffix = pathlib.Path(path).suffix.lower()
-    reader = READERS.get(suffix)
-    if reader is None:
-        raise SystemExit(f"Cannot read {suffix or path!r}. "
-                         f"Expected one of: {', '.join(sorted(READERS))}")
-    df = reader(path)
-    if "assumption" not in df.columns:
-        raise SystemExit(
-            f"{path} has no `assumption` column -- is it a *_cells file, or a "
-            "table from before the model_name -> assumption rename? Re-run "
-            "parse_assumptions.py on the JSONL to regenerate it."
-        )
-    df["label"] = df["assumption"].map(normalize_label)
-    return df
-
-
 def health(df: pd.DataFrame) -> pd.DataFrame:
     # The lean results table has no cell_key, so a cell is identified by its
     # design coordinates -- which is what makes a cell unique anyway.
-    keys = [c for c in ("cell_key",) if c in df.columns] or CELL_KEYS
+    keys = cell_keys(df)
     cells = df.drop_duplicates(keys)
     agg = {
         "cells": (keys[0], "size"),
@@ -104,7 +68,8 @@ def health(df: pd.DataFrame) -> pd.DataFrame:
     }
     if "has_response" in cells.columns:
         agg["reply"] = ("has_response", "mean")
-    return cells.groupby("persona_type").agg(**agg).sort_values("parsed")
+    groups = [*model_dimensions(cells), "persona_type"]
+    return cells.groupby(groups).agg(**agg).sort_values("parsed")
 
 
 def top_labels(df: pd.DataFrame, n: int = 3) -> pd.DataFrame:
@@ -113,21 +78,25 @@ def top_labels(df: pd.DataFrame, n: int = 3) -> pd.DataFrame:
     if top1.empty:
         return pd.DataFrame()
 
-    control = top1[top1.persona_type == NO_PERSONA]
-    base = control.label.value_counts(normalize=True) if len(control) \
-        else top1.label.value_counts(normalize=True)
-
     rows = []
-    for facet, sub in top1.groupby("persona_type"):
-        share = sub.label.value_counts(normalize=True)
-        for label, frac in share.head(n).items():
-            b = base.get(label, float("nan"))
-            rows.append({
-                "persona_type": facet, "label": label,
-                "share": frac, "n": int((sub.label == label).sum()),
-                "control_share": b,
-                "lift": (frac / b) if b and b == b and b > 0 else float("nan"),
-            })
+    dimensions = model_dimensions(top1)
+    outer = top1.groupby(dimensions, dropna=False) if dimensions else [((), top1)]
+    for group_value, model_df in outer:
+        values = group_value if isinstance(group_value, tuple) else (group_value,)
+        identity = dict(zip(dimensions, values))
+        control = model_df[model_df.persona_type == NO_PERSONA]
+        base = control.label.value_counts(normalize=True)
+        for facet, sub in model_df.groupby("persona_type"):
+            share = sub.label.value_counts(normalize=True)
+            for label, frac in share.head(n).items():
+                b = base.get(label, float("nan"))
+                rows.append({
+                    **identity,
+                    "persona_type": facet, "label": label,
+                    "share": frac, "n": int((sub.label == label).sum()),
+                    "control_share": b,
+                    "lift": (frac / b) if pd.notna(b) and b > 0 else float("nan"),
+                })
     return pd.DataFrame(rows)
 
 
@@ -137,7 +106,8 @@ def confidence(df: pd.DataFrame) -> pd.DataFrame:
         top1=("probability_norm", "max"),
         ent=("probability_norm", lambda s: entropy(list(s))),
     )
-    return per_cell.groupby(["persona_type", "prompt_type"]).agg(
+    groups = [*model_dimensions(per_cell), "persona_type", "prompt_type"]
+    return per_cell.groupby(groups).agg(
         cells=(keys[0], "size"), top1_mass=("top1", "mean"),
         entropy_bits=("ent", "mean"),
     ).round(3)
@@ -147,7 +117,11 @@ def framing_flip(df: pd.DataFrame) -> pd.DataFrame:
     """Does the top-1 assumption survive retelling the dilemma from the other
     side? One row per facet: the share of (person, dilemma) pairs that keep it."""
     top1 = df[(df["rank"] == 0) & df["label"].astype(bool)]
-    index = [c for c in ("persona_type", "persona_id", "prompt_id", "rep")
+    index = [
+        c for c in (
+            "run_id", "probe", "history_mode", "persona_type",
+            "persona_id", "prompt_id", "rep",
+        )
              if c in top1.columns]
     wide = top1.pivot_table(index=index, columns="prompt_type",
                             values="label", aggfunc="first")
@@ -157,7 +131,8 @@ def framing_flip(df: pd.DataFrame) -> pd.DataFrame:
     if both.empty:
         return pd.DataFrame()
     both = both.assign(same=both.original_post == both.flipped_story)
-    return (both.reset_index().groupby("persona_type")
+    groups = [*model_dimensions(both.reset_index()), "persona_type"]
+    return (both.reset_index().groupby(groups)
             .agg(pairs=("same", "size"), kept_top1=("same", "mean")).round(3)
             .sort_values("kept_top1"))
 

@@ -1,21 +1,38 @@
-# Planning, the grid, and --dry-run need only these.
-pyyaml
-pandas
-pyarrow            # parquet output from parse_assumptions.py
+# Everything the pipeline needs, in one file.
+#
+#     python -m pip install -r requirements.txt
+#     python -m syco doctor          # verifies these actually import
+#
+# One file rather than a base/dev/extras split: this is a research pipeline run
+# by the people who write it, on a handful of machines, and a split only pays
+# off when some of those machines deliberately install less. If a deployment
+# ever does want less, `syco doctor` already reports each group separately and
+# every optional import is guarded at its call site.
 
-# --- model registry -------------------------------------------------------
-huggingface_hub    # GGUF filename resolution + weight download
+# Data, configuration, and result files
+PyYAML>=6,<7
+pandas>=2.2,<4
+pyarrow>=15,<27
+openpyxl>=3.1,<4
 
-# --- local backends -------------------------------------------------------
-transformers       # chat templates always; the `hf` backend's engine
-# torch            # required by transformers to load weights
-# accelerate       # device_map sharding; required with bitsandbytes
-# bitsandbytes     # bnb-4bit / bnb-8bit quantization for the `hf` backend
-# llama-cpp-python # the `llamacpp` backend (GGUF)
+# Model registry, GGUF downloads, and model chat templates
+huggingface_hub>=0.28,<2
+transformers>=4.56,<6
 
-# --- API backends ---------------------------------------------------------
-# openai           # GPT family    (needs OPENAI_API_KEY)
-# anthropic        # Claude family (needs ANTHROPIC_API_KEY)
+# Enabled local GGUF models. See README.md for NVIDIA/CUDA installation notes.
+llama-cpp-python>=0.3.16,<0.4
 
-# --- optional -------------------------------------------------------------
-# openpyxl         # summarize_assumptions.py --out report.xlsx
+# API models configured in config/models.yaml
+openai>=2.54,<4
+anthropic>=0.125,<1
+
+# Topic model for `python -m syco topics` (tables 5-6). bertopic pulls in
+# umap-learn, hdbscan and scikit-learn; sentence-transformers pulls in torch,
+# which is the large one -- if that matters on a given machine, skip these two
+# lines and the command still prints its n-gram tables and says why it stopped.
+bertopic>=0.16,<0.18
+sentence-transformers>=3,<6
+
+# Tests and linting
+pytest>=8,<10
+ruff>=0.11,<1

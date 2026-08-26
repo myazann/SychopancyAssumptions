@@ -108,6 +108,7 @@ class ModelSpec:
     batch_size: int = 8             # local backends: prompts per generate() call
     max_workers: int = 4            # API backends: concurrent requests
     runtime: dict = field(default_factory=dict)
+    estimated_vram_mib: Optional[int] = None
     notes: str = ""
 
     @property
@@ -123,7 +124,20 @@ class ModelSpec:
         return safe.strip("._-") or "model"
 
     def provenance(self) -> dict:
-        """Everything a results row needs to be reproducible."""
+        """Canonical model provenance for manifests and compact result rows."""
+        # Sampling controls differ by provider. GPT reasoning models do not use
+        # temperature/top_p, and the Anthropic adapter never sends top_p. Claude
+        # 5 also accepts only its default temperature. Record what was actually
+        # sent rather than copying configuration values that were not applied.
+        temperature = self.temperature
+        top_p = self.top_p
+        if self.reasoning.control == "effort":
+            temperature = None
+            top_p = None
+        elif self.backend == ANTHROPIC_BACKEND:
+            top_p = None
+            if self.generation == "claude-5":
+                temperature = None
         return {
             "model_id": self.alias,
             "model_ref": self.ref,
@@ -133,8 +147,8 @@ class ModelSpec:
             "quantization": self.quantization.label,
             "quantized_file": self.quantization.resolved_file,
             "backend": self.backend,
-            "temperature": self.temperature,
-            "top_p": self.top_p,
+            "temperature": temperature,
+            "top_p": top_p,
             "max_output_tokens": self.max_output_tokens,
         }
 
@@ -381,6 +395,9 @@ def load_registry(path=CONFIG_PATH) -> ModelRegistry:
             batch_size=entry.get("batch_size", defaults.get("batch_size", 8)),
             max_workers=entry.get("max_workers", defaults.get("max_workers", 4)),
             runtime=runtime,
+            estimated_vram_mib=(entry.get("resources") or {}).get(
+                "estimated_vram_mib"
+            ),
             notes=(entry.get("notes") or "").strip(),
         ))
 

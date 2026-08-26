@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from typing import Optional
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 @dataclass
@@ -34,17 +34,14 @@ class AssumptionRecord:
     n_assumptions_asked: int
     persona_turns: int
     persona_recovered: bool
-    # -- model
-    model_id: str
+    # -- compact run/model audit fields. Full model identity and serving
+    # provenance live in the adjacent manifest; the redundant descriptive
+    # columns are not repeated here.
+    run_id: str = ""
     model_ref: str = ""
-    model_family: str = ""
-    model_generation: str = ""
-    model_release_date: Optional[str] = None
-    backend: str = ""
     quantization: str = ""
-    quantized_file: Optional[str] = None
-    temperature: float = 0.0
-    top_p: float = 1.0
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
     max_output_tokens: int = 0
     thinking_applied: str = ""
     thinking_standardized: bool = True
@@ -116,3 +113,31 @@ def read_rows(path) -> list:
             except json.JSONDecodeError:
                 continue
     return rows
+
+
+def canonical_rows(rows: list) -> tuple[list, dict]:
+    """Collapse append-only attempts to one observation per cell.
+
+    The latest successful attempt wins. If a cell has never succeeded, its
+    latest failed attempt remains visible. The returned diagnostics make retry
+    history explicit without letting it inflate downstream cell counts.
+    """
+    by_key, unkeyed = {}, []
+    attempts = {}
+    for row in rows:
+        key = row.get("cell_key")
+        if not key:
+            unkeyed.append(row)
+            continue
+        attempts[key] = attempts.get(key, 0) + 1
+        previous = by_key.get(key)
+        if previous is None or previous.get("error") or not row.get("error"):
+            by_key[key] = row
+    canonical = list(by_key.values()) + unkeyed
+    diagnostics = {
+        "attempts": len(rows),
+        "cells": len(canonical),
+        "retried_cells": sum(n > 1 for n in attempts.values()),
+        "extra_attempts": sum(max(0, n - 1) for n in attempts.values()),
+    }
+    return canonical, diagnostics

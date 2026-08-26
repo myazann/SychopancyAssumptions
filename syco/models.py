@@ -92,6 +92,16 @@ def _retry(fn, attempts: int = 4, base: float = 1.5):
             return fn()
         except Exception as err:
             last = err
+            status = getattr(err, "status_code", None)
+            retryable = (
+                (status is None and not isinstance(
+                    err, (TypeError, ValueError, KeyError, AttributeError)
+                ))
+                or status in {408, 409, 429}
+                or isinstance(status, int) and status >= 500
+            )
+            if not retryable:
+                raise
             if attempt == attempts - 1:
                 break
             time.sleep(min(base ** attempt, 20))
@@ -159,17 +169,38 @@ class MockAdapter(ChatAdapter):
 
     batches = True
 
+    def thinking_plan(self, want_thinking: bool = False) -> ThinkingPlan:
+        return ThinkingPlan(
+            want_thinking=want_thinking,
+            applied="mock:no_thinking",
+            standardized=not want_thinking,
+            max_tokens=self.spec.max_output_tokens,
+        )
+
     def chat(self, conv: Conversation, n: int = 1, plan=None) -> list:
         import json
         import random
 
         rng = random.Random(int(conv.digest(), 16) % (2**32))
+        prompt = conv.messages[-1]["content"] if conv.messages else ""
+        n_models = prompt.count('"model_name"')
+        if n_models == 0:
+            return [f"[mock reply {draw}] You are not in the wrong here."
+                    for draw in range(n)]
         labels = ["seeking validation", "seeking an objective read",
-                  "venting", "asking for a decision", "testing the waters"]
+                  "venting", "asking for a decision", "testing the waters",
+                  "wanting reassurance", "weighing tradeoffs",
+                  "looking for perspective", "setting a boundary",
+                  "trying to resolve conflict"]
+        if n_models > len(labels):
+            raise ValueError(
+                f"mock backend supports at most {len(labels)} assumptions, "
+                f"but the probe asks for {n_models}"
+            )
         out = []
         for draw in range(n):
-            picks = rng.sample(labels, 3)
-            weights = sorted((rng.random() for _ in range(3)), reverse=True)
+            picks = rng.sample(labels, n_models)
+            weights = sorted((rng.random() for _ in range(n_models)), reverse=True)
             total = sum(weights)
             block = {"mental_models": [
                 {"model_name": p, "description": f"The user is {p}.",
@@ -412,7 +443,7 @@ class HFAdapter(ChatAdapter):
         super().__init__(spec)
         try:
             import torch
-            from transformers import AutoModelForCausalLM, AutoTokenizer
+            from transformers import AutoTokenizer
         except ImportError as err:
             raise RuntimeError("The HF path needs `transformers` and `torch`.") from err
 
@@ -612,39 +643,42 @@ class OpenAIAdapter(ChatAdapter):
         self.client = OpenAI()
 
     def thinking_plan(self, want_thinking: bool = False) -> ThinkingPlan:
-        """GPT-5.x are reasoning models controlled by `reasoning_effort`. The
+        """GPT-5.x are reasoning models controlled by `reasoning.effort`. The
         off-level differs by generation: 5.6 has "none", a real zero; earlier
         generations only reach "minimal", a floor -- those rows are marked
         `standardized=False` because the intended state was not reached."""
         off = ("none" if self.spec.generation in self._EFFORT_NONE_GENERATIONS
                else "minimal")
         effort = "high" if want_thinking else off
-        return ThinkingPlan(want_thinking, {"reasoning_effort": effort},
+        return ThinkingPlan(want_thinking, {"reasoning": {"effort": effort}},
                             f"reasoning_effort={effort}",
                             (want_thinking or off == "none"),
                             self.spec.max_output_tokens)
 
     def chat(self, conv: Conversation, n: int = 1, plan=None) -> list:
         plan = plan or self.thinking_plan()
-        # Reasoning models (GPT-5.x) reject any temperature/top_p but the
-        # default -- effort is the only knob. Sending them 400s every call, so
-        # the spec's decoding settings simply do not apply to those models and
-        # the row records what was actually in force.
-        sampling = ({} if self.spec.reasoning.control == "effort"
-                    else {"temperature": self.spec.temperature, "top_p": self.spec.top_p})
+        # Current GPT reasoning models use the Responses API. Their sampling
+        # control is reasoning.effort; temperature/top_p are intentionally not
+        # sent and provenance records them as null.
+        request = {
+            "model": self.spec.ref,
+            "input": conv.as_list,
+            "max_output_tokens": plan.max_tokens,
+            **plan.kwargs,
+        }
+        if conv.system:
+            request["instructions"] = conv.system
+        if self.spec.reasoning.control != "effort":
+            request.update(temperature=self.spec.temperature, top_p=self.spec.top_p)
 
-        def call():
-            return self.client.chat.completions.create(
-                model=self.spec.ref,
-                messages=build_messages(conv),
-                max_completion_tokens=plan.max_tokens,
-                n=n,
-                **sampling,
-                **plan.kwargs,
-            )
+        outputs = []
+        for _ in range(n):
+            def call():
+                return self.client.responses.create(**request)
 
-        resp = _retry(call)
-        return [(c.message.content or "") for c in resp.choices]
+            resp = _retry(call)
+            outputs.append(getattr(resp, "output_text", "") or "")
+        return outputs
 
 
 # ---------------------------------------------------------------------------
@@ -676,6 +710,11 @@ class AnthropicAdapter(ChatAdapter):
 
         if want_thinking:
             if gen in self._LEGACY_BUDGET_GENERATIONS:
+                if mt <= 1024:
+                    raise ValueError(
+                        f"{self.spec.alias}: Anthropic thinking needs max_tokens "
+                        "greater than its 1024-token minimum thinking budget"
+                    )
                 budget = max(1024, mt - 512)
                 return ThinkingPlan(True, {"thinking": {"type": "enabled",
                                                         "budget_tokens": budget}},
@@ -693,20 +732,27 @@ class AnthropicAdapter(ChatAdapter):
 
     def chat(self, conv: Conversation, n: int = 1, plan=None) -> list:
         plan = plan or self.thinking_plan()
+        gen = self.spec.generation
         outputs = []
         for _ in range(n):
             def call():
                 kw = dict(plan.kwargs)
-                # temperature and thinking are mutually exclusive on Claude.
-                if "thinking" not in kw or kw["thinking"].get("type") == "disabled":
+                # Claude 5 currently accepts neither a custom temperature nor
+                # top_p here. Older non-thinking/disabled calls may use the
+                # configured temperature; thinking calls omit sampling knobs.
+                if (gen != "claude-5" and
+                        ("thinking" not in kw or
+                         kw["thinking"].get("type") == "disabled")):
                     kw["temperature"] = self.spec.temperature
-                return self.client.messages.create(
+                request = dict(
                     model=self.spec.ref,
                     max_tokens=plan.max_tokens,
-                    system=conv.system or None,
                     messages=conv.as_list,
                     **kw,
                 )
+                if conv.system:
+                    request["system"] = conv.system
+                return self.client.messages.create(**request)
 
             resp = _retry(call)
             if getattr(resp, "stop_reason", None) == "refusal":

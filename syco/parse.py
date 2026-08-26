@@ -7,10 +7,10 @@ generations.
 Models do not honor the requested format exactly. In practice the failures are:
 a ```json fence around the block, prose before it, a trailing comma, a
 probability written as "0.4" or 40%, `RESPONSE` spelled as a markdown heading,
-and truncation partway through the reply. Each is handled here, and each is
-also *reported* -- `parse_status` distinguishes a clean parse from a salvaged
-one, because a finding that only holds on salvaged rows is a finding about the
-parser.
+alternate field names, a numbered Markdown field list, and truncation partway
+through the reply. Each is handled here, and each is also *reported* --
+`parse_status` distinguishes a clean parse from a salvaged one, because a
+finding that only holds on salvaged rows is a finding about the parser.
 """
 from __future__ import annotations
 
@@ -22,19 +22,22 @@ from typing import Optional
 CLEAN = "clean"            # the requested JSON parsed as-is
 REPAIRED = "repaired"      # parsed after fixing fences/trailing commas
 SALVAGED = "salvaged"      # field-by-field regex extraction
+INVALID_ORDER = "invalid_order"  # assumptions appeared only after the reply
 FAILED = "failed"          # no mental models found at all
 
-# `RESPONSE:` as its own line, optionally decorated as a markdown heading or
-# bolded, which is how instruct models tend to render a requested heading.
+# `RESPONSE:` (or a common model-generated synonym) as its own line,
+# optionally decorated as a markdown heading or bolded.
 _RESPONSE_RE = re.compile(
-    r"^[ \t]*(?:#{1,6}[ \t]*)?(?:\*\*|__)?RESPONSE(?:\*\*|__)?[ \t]*:?[ \t]*(?:\*\*|__)?[ \t]*$",
+    r"^[ \t]*(?:#{1,6}[ \t]*)?(?:\*\*|__)?(?:ACTUAL[ \t]+)?(?:RESPONSE|ANSWER)"
+    r"(?:\*\*|__)?[ \t]*:?[ \t]*(?:\*\*|__)?[ \t]*$",
     re.IGNORECASE | re.MULTILINE)
 # The same heading inline, e.g. `RESPONSE: You are not wrong...`
 # ...and the same heading inline, e.g. `RESPONSE: You are not wrong...`. The
 # closing `**` may sit on either side of the colon, since models bold either the
 # word or the whole heading.
 _RESPONSE_INLINE_RE = re.compile(
-    r"(?:^|\n)[ \t]*(?:\*\*|__)?RESPONSE(?:\*\*|__)?[ \t]*:[ \t]*(?:\*\*|__)?[ \t]*",
+    r"(?:^|\n)[ \t]*(?:\*\*|__)?(?:ACTUAL[ \t]+)?(?:RESPONSE|ANSWER)"
+    r"(?:\*\*|__)?[ \t]*:[ \t]*(?:\*\*|__)?[ \t]*",
     re.IGNORECASE)
 _FENCE_RE = re.compile(r"```(?:json|JSON)?\s*(.*?)```", re.DOTALL)
 _TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
@@ -44,10 +47,25 @@ _PERCENT_RE = re.compile(r"^\s*([0-9.]+)\s*%\s*$")
 # quote: the descriptions that break the JSON parser are exactly the ones with
 # unescaped quotes inside them, and a character class would drop those entries.
 _ENTRY_RE = re.compile(
-    r"""["']model_name["']\s*:\s*["'](?P<name>.*?)["']\s*,?\s*"""
+    r"""["'](?:model_name|name|assumption|label)["']\s*:\s*["'](?P<name>.*?)["']\s*,?\s*"""
     r"""(?:["']description["']\s*:\s*["'](?P<desc>.*?)["']\s*,?\s*)?"""
-    r"""["']probability["']\s*:\s*(?P<prob>[0-9.eE+-]+|["'][^"']*["'])""",
-    re.DOTALL,
+    r"""["'](?:probability|confidence|prob)["']\s*:\s*(?P<prob>[0-9.eE+%\-]+|["'][^"']*["'])""",
+    re.DOTALL | re.IGNORECASE,
+)
+
+# Last-resort support for a numbered/Markdown field list. Requiring all three
+# labels avoids turning probability-related prose in the actual reply into an
+# assumption.
+_LABELED_ENTRY_RE = re.compile(
+    r"""(?im)^[ \t]*(?:[-*][ \t]+|\d+[.)][ \t]+)?(?:\*\*|__)?"""
+    r"""(?:model[ _]name|name|assumption|label)(?:\*\*|__)?[ \t]*:[ \t]*"""
+    r"""(?:\*\*|__)?[ \t]*"""
+    r"""(?P<name>[^\n]+?)\s*$\s*"""
+    r"""^[ \t]*(?:[-*][ \t]+)?(?:\*\*|__)?description(?:\*\*|__)?"""
+    r"""[ \t]*:[ \t]*(?:\*\*|__)?[ \t]*(?P<desc>[^\n]+?)\s*$\s*"""
+    r"""^[ \t]*(?:[-*][ \t]+)?(?:\*\*|__)?(?:probability|confidence|prob)"""
+    r"""(?:\*\*|__)?[ \t]*:[ \t]*(?:\*\*|__)?[ \t]*"""
+    r"""(?P<prob>[0-9.eE+%\-]+|["'][^"']*["'])"""
 )
 
 
@@ -57,10 +75,8 @@ class MentalModel:
 
     The probe asks the model to emit these under the JSON key `model_name` --
     the paper's schema, kept verbatim so the instrument is unchanged. The field
-    is called `assumption` here because "model" is already taken twice over in
-    this codebase (the LLM, and `model_id` on every row), and a column named
-    `model_name` next to `model_id` reads as the LLM's name rather than what it
-    actually is: the label the LLM gave one hypothesis about its user.
+    is called `assumption` here because "model" already refers to the LLM, while
+    this value is the label the LLM gave one hypothesis about its user.
     """
     rank: int
     assumption: str
@@ -101,13 +117,18 @@ def _to_float(value) -> Optional[float]:
     return num if 0.0 <= num <= 1.0 else None
 
 
-def _find_json_object(text: str, needle: str = "mental_models") -> Optional[str]:
-    """The smallest balanced {...} containing `needle`, ignoring braces inside
+def _find_json_object(text: str) -> Optional[str]:
+    """The smallest balanced {...} containing a known list key, ignoring braces inside
     strings. Brace matching rather than a regex, because descriptions contain
     both braces and quotes."""
-    anchor = text.find(needle)
-    if anchor < 0:
+    key = re.search(
+        r'''["']\s*(?:mental[_ ]?models|mentalModels|models)\s*["']''',
+        text,
+        re.IGNORECASE,
+    )
+    if key is None:
         return None
+    anchor = key.start()
     start = text.rfind("{", 0, anchor)
     while start >= 0:
         depth, in_string, escape = 0, False, False
@@ -148,12 +169,15 @@ def _build(entries: list) -> list:
     for i, entry in enumerate(entries):
         if not isinstance(entry, dict):
             continue
-        name = str(entry.get("model_name") or entry.get("name") or "").strip()
+        name = str(entry.get("model_name") or entry.get("name") or
+                   entry.get("assumption") or entry.get("label") or "").strip()
         desc = str(entry.get("description") or "").strip()
         if not name and not desc:
             continue
+        probability = (entry.get("probability") if "probability" in entry else
+                       entry.get("confidence", entry.get("prob")))
         out.append(MentalModel(rank=len(out), assumption=name, description=desc,
-                               probability=_to_float(entry.get("probability"))))
+                               probability=_to_float(probability)))
     return out
 
 
@@ -168,13 +192,31 @@ def _split_response(text: str) -> tuple:
     return text, "", False
 
 
-def parse_completion(raw: str) -> ParsedProbe:
+def _regex_models(source: str) -> list[MentalModel]:
+    matches = list(_ENTRY_RE.finditer(source))
+    if not matches:
+        matches = list(_LABELED_ENTRY_RE.finditer(source))
+    return [
+        MentalModel(
+            rank=i,
+            assumption=m.group("name").strip().strip("`*_ \"'"),
+            description=(m.group("desc") or "").strip().strip("`*_ \"'"),
+            probability=_to_float(m.group("prob")),
+        )
+        for i, m in enumerate(matches)
+    ]
+
+
+def parse_completion(raw: str, expected_n: Optional[int] = None) -> ParsedProbe:
     """Pull the verbalized assumptions and the reply out of one completion."""
     if not raw or not raw.strip():
         return ParsedProbe(status=FAILED, notes="empty completion")
 
     head, response, has_response = _split_response(raw)
-    result = ParsedProbe(response=response, has_response=has_response)
+    result = ParsedProbe(
+        response=response,
+        has_response=has_response and bool(response.strip()),
+    )
 
     # The block is normally in the head; a model that answered first still put
     # it somewhere, so fall back to the whole completion.
@@ -186,7 +228,9 @@ def parse_completion(raw: str) -> ParsedProbe:
         if block is None:
             continue
 
-        for candidate, status in ((block, CLEAN),
+        decorated = source.strip() != block.strip()
+        first_status = REPAIRED if decorated else CLEAN
+        for candidate, status in ((block, first_status),
                                   (_TRAILING_COMMA_RE.sub(r"\1", block), REPAIRED)):
             try:
                 entries = _entries_from_obj(json.loads(candidate, strict=False))
@@ -194,7 +238,7 @@ def parse_completion(raw: str) -> ParsedProbe:
                 continue
             models = _build(entries)
             if models:
-                result.status = status
+                result.status = INVALID_ORDER if salvage_note else status
                 result.mental_models = models
                 result.notes = salvage_note
                 break
@@ -204,14 +248,10 @@ def parse_completion(raw: str) -> ParsedProbe:
     if not result.mental_models:
         # Field-by-field: survives truncation mid-block and unescaped quotes
         # inside a description, which is what actually breaks these.
-        models = [
-            MentalModel(rank=i, assumption=m.group("name").strip(),
-                        description=(m.group("desc") or "").strip(),
-                        probability=_to_float(m.group("prob")))
-            for i, m in enumerate(_ENTRY_RE.finditer(raw))
-        ]
+        models = _regex_models(raw)
         if models:
-            result.status = SALVAGED
+            in_head = bool(_regex_models(head))
+            result.status = SALVAGED if in_head else INVALID_ORDER
             result.mental_models = models
         else:
             result.status = FAILED
@@ -220,10 +260,13 @@ def parse_completion(raw: str) -> ParsedProbe:
     probs = [m.probability for m in result.mental_models if m.probability is not None]
     result.prob_sum = round(sum(probs), 6) if probs else None
 
-    if result.mental_models and not has_response:
-        # Truncated before the heading, or the model skipped it. Either way the
-        # reply is missing, which matters when comparing to the answers table.
-        result.notes = (result.notes + "; " if result.notes else "") + "no RESPONSE heading"
+    if result.mental_models and not result.has_response:
+        missing = "empty RESPONSE" if has_response else "no RESPONSE heading"
+        result.notes = (result.notes + "; " if result.notes else "") + missing
+    if (expected_n is not None and result.mental_models and
+            result.n_assumptions != expected_n):
+        mismatch = f"expected {expected_n} assumptions, found {result.n_assumptions}"
+        result.notes = (result.notes + "; " if result.notes else "") + mismatch
     return result
 
 
@@ -242,14 +285,15 @@ def normalized_probabilities(models: list) -> list:
     return [None if p is None else p / total for p in probs]
 
 
-# What one results row carries by default: the design cell, which model produced
-# it, the assumption itself, and the one flag that says whether the row can be
+# What one results row carries by default: the design cell, the assumption
+# itself, and the one flag that says whether the row can be
 # trusted. `rep` is in here rather than behind --full on purpose -- drop it and
 # a multi-draw run silently looks like duplicate rows.
 LEAN_COLUMNS = (
-    "model_id", "persona_type", "persona_id", "prompt_type", "prompt_id", "rep",
+    "run_id", "probe", "history_mode", "persona_type", "persona_id",
+    "prompt_type", "prompt_id", "rep",
     "rank", "assumption", "description", "probability", "probability_norm",
-    "parse_status",
+    "parse_status", "has_response",
 )
 
 
@@ -259,13 +303,12 @@ def to_records(row: dict, parsed: ParsedProbe, full: bool = False) -> list:
     A cell whose parse failed still yields one record with `rank = None`, so a
     failure is a visible row rather than a silently missing cell.
 
-    `full=True` adds the provenance and per-cell diagnostics. They are off by
-    default because they are constant across a run -- every row would repeat the
-    same backend and probe label -- and the JSONL already holds them per cell.
+    `full=True` adds per-cell diagnostics. Constant model identity and serving
+    provenance live in the run manifest rather than either output table.
     """
     record = {
         "cell_key": row.get("cell_key"),
-        "model_id": row.get("model_id"),
+        "run_id": row.get("run_id"),
         "persona_type": row.get("persona_type"),
         "persona_id": row.get("persona_id"),
         "prompt_type": row.get("prompt_type"),
@@ -273,7 +316,6 @@ def to_records(row: dict, parsed: ParsedProbe, full: bool = False) -> list:
         "rep": row.get("rep"),
         "probe": row.get("probe"),
         "history_mode": row.get("history_mode"),
-        "backend": row.get("backend"),
         "persona_turns": row.get("persona_turns"),
         "persona_recovered": row.get("persona_recovered"),
         "parse_status": parsed.status,

@@ -1,6 +1,6 @@
 """Open-ended verbalized assumptions over persona-conditioned dilemmas.
 
-The probe is from Chen et al., *Verbalizing LLMs' assumptions to explain and
+The probe is from Cheng et al., *Verbalizing LLMs' assumptions to explain and
 control sycophancy* (vendored under `verbalizedassumptions/`). The model layer
 is adapted from myazan/LLM-Self-Concept.
 
@@ -11,5 +11,23 @@ is adapted from myazan/LLM-Self-Concept.
     syco.models          chat adapters: hf, llamacpp, openai, anthropic, mock
     syco.store           append-only JSONL results and resume
     syco.parse           raw completion -> mental models + reply
+    syco.tables          reading a parsed table; shared analysis conventions
+    syco.topics          n-grams and BERTopic over the assumption text
+    syco.experiments     validated experiment profiles
+    syco.manifest        immutable run identity and provenance
+    syco.orchestrate     multi-model scheduling and pipeline operations
 """
-__all__ = ["data", "prompts", "grid", "model_registry", "models", "store", "parse"]
+__all__ = [
+    "data",
+    "experiments",
+    "grid",
+    "manifest",
+    "model_registry",
+    "models",
+    "orchestrate",
+    "parse",
+    "prompts",
+    "store",
+    "tables",
+    "topics",
+]

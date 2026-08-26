@@ -1,0 +1,33 @@
+schema_version: "1.0"
+name: default
+
+# `enabled` is resolved from config/models.yaml. There is one source of truth
+# for the default model set; the orchestration layer does not repeat aliases.
+models: enabled
+
+probe:
+  kind: openended
+  history_mode: native
+  n_models: 3
+  system: ""
+  thinking: false
+
+design:
+  persona_types: null
+  prompt_types: [original_post, flipped_story]
+  n_personas: 25
+  n_prompts: 20
+  n_reps: 1
+  include_control: true
+  seed: 1000
+  match_existing: null
+
+execution:
+  poll_seconds: 2
+  wait_report_seconds: 60
+  wait_timeout_seconds: null
+
+output:
+  results_dir: results
+  logs_dir: logs
+  merge_dir: results/merged

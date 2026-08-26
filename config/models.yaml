@@ -6,7 +6,7 @@
 # administers are listed; add more by pasting the entry across.
 #
 #   alias      short, stable name -- used in CLI args, filenames, and the
-#              `model_id` column of every results row.
+#              adjacent run manifest (not repeated on every results row).
 #   ref        the concrete thing to load. Its SHAPE picks the backend:
 #                *.gguf / *-GGUF  -> llamacpp
 #                "org/name"       -> hf (transformers)
@@ -15,6 +15,16 @@
 #   hf_id      the unquantized upstream, recorded for provenance.
 #   tokenizer_id  public repo the chat template is read from (GGUF path needs
 #              this: llama.cpp has the weights, transformers has the template).
+#
+# `enabled:` marks the DEFAULT SET -- the models a plain run administers.
+# That set is Gemma3-27B, Gemma3-12B, Qwen3.6-27B, Qwen3.6-35B-A3B and
+# Llama-3.1-8B, every one of them GGUF through llama.cpp: the quant is baked
+# into the file rather than applied at load time, and unsloth's mirrors are
+# ungated, so a default run needs no HF token. The `hf` (transformers) entries
+# are kept but `enabled: false` -- reach for one by passing its alias to
+# --model when you want batched generation, which llama.cpp cannot do.
+# Reasoning is off for all five: gemma and llama have no thinking channel, and
+# the qwen chat template is toggled off.
 #
 # GGUF filenames are NOT pinned here -- the loader resolves the file from the
 # repo listing using the quant tag, because those names drift (Q4_K_M vs
@@ -69,6 +79,10 @@ reasoning_by_family:
     thinks_by_default: false
     control: none
     controllable: true
+  llama:
+    thinks_by_default: false      # 3.x has no thinking channel at all
+    control: none
+    controllable: true
   qwen:
     thinks_by_default: true
     control: template_toggle      # chat template enable_thinking=False
@@ -96,28 +110,33 @@ models:
     release_date: "2025-03-12"
     params_total_b: 12
     size_tier: small
-    backend: hf
-    ref: google/gemma-3-12b-it
-    hf_id: google/gemma-3-12b-it
-    quantization: {format: hf, method: bnb-4bit}
-
-  # Same weights through llama.cpp. Cheaper on a Mac, and the quant is baked
-  # into the file rather than applied at load time.
-  - alias: Gemma3-12B-gguf
-    family: gemma
-    generation: gemma-3
-    release_date: "2025-03-12"
-    params_total_b: 12
-    size_tier: small
     backend: llamacpp
     ref: unsloth/gemma-3-12b-it-GGUF
     hf_id: google/gemma-3-12b-it
     tokenizer_id: unsloth/gemma-3-12b-it
     quantization: {format: gguf, quant: Q4_K_M}
+    resources: {estimated_vram_mib: 15000}
+
+  # The same weights through transformers: bnb-4bit applied at load time, and
+  # the only local backend that batches -- llama.cpp runs one sequence at a
+  # time. Off by default; reach for it when throughput matters. `ref` is the
+  # gated google repo, so this one needs an HF token.
+  - alias: Gemma3-12B-hf
+    family: gemma
+    generation: gemma-3
+    release_date: "2025-03-12"
+    params_total_b: 12
+    size_tier: small
+    backend: hf
+    ref: google/gemma-3-12b-it
+    hf_id: google/gemma-3-12b-it
+    quantization: {format: hf, method: bnb-4bit}
+    enabled: false
 
   # The cheap smoke-test model: same family and chat template as the 12B, small
   # enough to run unquantized on a laptop. Use it to check a design and the
-  # parse rate before committing a long run to the 12B.
+  # parse rate before committing a long run to the 12B. Not in the default
+  # set -- reach for it with `--model Gemma3-4B`.
   - alias: Gemma3-4B
     family: gemma
     generation: gemma-3
@@ -127,6 +146,7 @@ models:
     backend: hf
     ref: google/gemma-3-4b-it
     hf_id: google/gemma-3-4b-it
+    enabled: false
 
   - alias: Gemma3-4B-gguf
     family: gemma
@@ -139,7 +159,13 @@ models:
     hf_id: google/gemma-3-4b-it
     tokenizer_id: unsloth/gemma-3-4b-it
     quantization: {format: gguf, quant: Q4_K_M}
+    enabled: false
 
+  # 15.4GB of weights plus an f16 KV cache does not fit one 24GB card at the
+  # default n_ctx: 16384 dies in llama_context creation and 12288 aborts the
+  # PROCESS mid-generation (CUDA error in ggml_cuda_mul_mat_q, SIGABRT), which
+  # would kill a long run rather than raise. 8192 measures at 20.6GB and runs.
+  # Raise it back if both GPUs are free, or quantize the KV cache.
   - alias: Gemma3-27B
     family: gemma
     generation: gemma-3
@@ -151,11 +177,44 @@ models:
     hf_id: google/gemma-3-27b-it
     tokenizer_id: unsloth/gemma-3-27b-it
     quantization: {format: gguf, quant: Q4_K_M}
-    enabled: false
+    runtime: {n_ctx: 8192}
+    resources: {estimated_vram_mib: 21600}
 
   # =========================================================================
   # QWEN -- open weights, hybrid thinking (asserted off by the adapter)
   # =========================================================================
+
+  # Qwen3.6, April 2026. The chat template still honors enable_thinking=False
+  # (it pre-fills an empty <think></think> block), so the adapter can assert
+  # the probe's thinking-off state on both of these.
+  - alias: Qwen3.6-27B
+    family: qwen
+    generation: qwen-3.6
+    release_date: "2026-04-21"
+    params_total_b: 27
+    size_tier: medium
+    backend: llamacpp
+    ref: unsloth/Qwen3.6-27B-GGUF
+    hf_id: Qwen/Qwen3.6-27B
+    tokenizer_id: unsloth/Qwen3.6-27B
+    quantization: {format: gguf, quant: Q4_K_M}
+    resources: {estimated_vram_mib: 18600}
+
+  # MoE: 35B total, 3B active. The repo ships only UD- files, which the quant
+  # tag still matches. ~22GB at Q4_K_M, so it wants a 24GB card to itself --
+  # llama.cpp splits it across both if it does not fit.
+  - alias: Qwen3.6-35B-A3B
+    family: qwen
+    generation: qwen-3.6
+    release_date: "2026-04-15"
+    params_total_b: 35
+    size_tier: medium
+    backend: llamacpp
+    ref: unsloth/Qwen3.6-35B-A3B-GGUF
+    hf_id: Qwen/Qwen3.6-35B-A3B
+    tokenizer_id: unsloth/Qwen3.6-35B-A3B
+    quantization: {format: gguf, quant: Q4_K_M}
+    resources: {estimated_vram_mib: 22800}
 
   - alias: Qwen3.5-9B
     family: qwen
@@ -169,6 +228,26 @@ models:
     tokenizer_id: unsloth/Qwen3.5-9B
     quantization: {format: gguf, quant: Q4_K_M}
     enabled: false
+
+  # =========================================================================
+  # LLAMA -- open weights, nothing to turn off: no thinking channel
+  # =========================================================================
+
+  # meta-llama/Llama-3.1-8B-Instruct is gated behind manual approval, so `ref`
+  # and `tokenizer_id` point at unsloth's ungated mirrors of the same weights
+  # and the same chat template; `hf_id` records the upstream.
+  - alias: Llama-3.1-8B
+    family: llama
+    generation: llama-3.1
+    release_date: "2024-07-23"
+    params_total_b: 8
+    size_tier: small
+    backend: llamacpp
+    ref: unsloth/Llama-3.1-8B-Instruct-GGUF
+    hf_id: meta-llama/Llama-3.1-8B-Instruct
+    tokenizer_id: unsloth/Llama-3.1-8B-Instruct
+    quantization: {format: gguf, quant: Q4_K_M}
+    resources: {estimated_vram_mib: 9500}
 
   # =========================================================================
   # CLAUDE -- API
@@ -189,6 +268,7 @@ models:
     release_date: "2025-10-01"
     ref: claude-haiku-4-5-20251001
     backend: anthropic
+    reasoning: {thinks_by_default: false}
     max_workers: 8
     enabled: false
 

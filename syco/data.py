@@ -23,6 +23,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+import warnings
 from dataclasses import dataclass
 
 import pandas as pd
@@ -63,6 +64,13 @@ def _unescape(raw: str) -> str:
                    .replace('\\"', '"').replace("\\'", "'").replace("\\\\", "\\"))
 
 
+def _literal_eval_quiet(text: str):
+    """Parse Python literals without leaking invalid-escape data warnings."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SyntaxWarning)
+        return ast.literal_eval(text)
+
+
 def recover_messages(text) -> list:
     """Best-effort parse of a stored transcript into a message list.
 
@@ -80,7 +88,7 @@ def recover_messages(text) -> list:
     if not text or text == "[]":
         return []
 
-    for loader in (lambda s: json.loads(s, strict=False), ast.literal_eval):
+    for loader in (lambda s: json.loads(s, strict=False), _literal_eval_quiet):
         try:
             parsed = loader(text)
         except Exception:
