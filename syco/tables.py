@@ -80,20 +80,28 @@ READERS = {
 
 
 def load(path) -> pd.DataFrame:
-    """A parsed assumptions table, with the normalized `label` column added."""
+    """Load an open-ended or structured parsed table.
+
+    Open-ended tables receive the normalized ``label`` column used by the text
+    analyses. Structured tables already have their fixed ``dimension`` key and
+    numeric ``score``, so they are returned without inventing a label.
+    """
     suffix = pathlib.Path(path).suffix.lower()
     reader = READERS.get(suffix)
     if reader is None:
         raise SystemExit(f"Cannot read {suffix or path!r}. "
                          f"Expected one of: {', '.join(sorted(READERS))}")
     df = reader(path)
-    if "assumption" not in df.columns:
+    is_openended = "assumption" in df.columns
+    is_structured = {"dimension", "score"}.issubset(df.columns)
+    if not (is_openended or is_structured):
         raise SystemExit(
-            f"{path} has no `assumption` column -- is it a *_cells file, or a "
-            "table from before the model_name -> assumption rename? Re-run "
-            "parse_assumptions.py on the JSONL to regenerate it."
+            f"{path} is neither an open-ended assumptions table nor a structured "
+            "scores table -- is it a *_cells file? Re-run parse on the JSONL "
+            "to regenerate it."
         )
-    df["label"] = df["assumption"].map(normalize_label)
+    if is_openended:
+        df["label"] = df["assumption"].map(normalize_label)
     # Analysis downstream joins term and topic assignments back on position, so
     # the index has to be unique. csv/json round-trips do not guarantee that.
     return df.reset_index(drop=True)

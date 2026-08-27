@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Administer the open-ended verbalized-assumptions probe over the persona x
-dilemma design.
+"""Administer a Verbalized Assumptions probe over the persona x dilemma design.
 
-The probe is from Chen et al., *Verbalizing LLMs' assumptions to explain and
-control sycophancy*: before answering, the model states its top-k mental models
-of the user with probabilities, then replies. Asking for the assumptions FIRST
-is the method -- it makes visible what the model thinks it is talking to, which
-is exactly the thing a persona is supposed to be moving.
+The probes are from Cheng et al., *Verbalizing LLMs' assumptions to explain and
+control sycophancy*. Select `openended`, `4dims`, or `supporttypes`; all use the
+same paired persona x dilemma grid. Before answering, the model states either
+its top-k mental models or its scores on fixed belief dimensions, then replies.
+Asking for the assumptions FIRST is the method -- it makes visible what the
+model thinks it is talking to, which is exactly the thing a persona is supposed
+to be moving.
 
 Examples
 --------
@@ -19,6 +20,11 @@ Exercise the whole pipeline offline, including the parser:
 
     python -m syco run --model Gemma3-12B --dry-run \
         --n-personas 2 --n-prompts 2 --out results/smoke.jsonl
+
+Run the four structured sycophancy-related dimensions:
+
+    python -m syco run --model Gemma3-12B --probe 4dims --dry-run \
+        --n-personas 2 --n-prompts 2
 
 Collect assumptions for cells the existing answers table already covers, so
 every assumption row sits beside an answer from the same model:
@@ -45,7 +51,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from syco import grid
 from syco import prompts as probe_prompts
-from syco.data import load_answers, load_personas, load_prompts
+from syco.data import load_personas, load_prompts
 from syco.manifest import build_manifest, ensure_manifest, manifest_path
 from syco.model_registry import ANTHROPIC_BACKEND, load_registry
 from syco.models import Conversation, build_adapter
@@ -127,7 +133,9 @@ def make_record(
         prompt_id=cell.prompt.prompt_id,
         rep=cell.rep,
         probe=spec_probe.label(),
-        n_assumptions_asked=spec_probe.n_models,
+        n_assumptions_asked=(spec_probe.n_models
+                             if spec_probe.family == "open-ended" else 0),
+        n_dimensions_asked=len(spec_probe.dimensions),
         persona_turns=cell.persona.n_turns,
         persona_recovered=cell.persona.recovered,
         thinking_applied=plan.applied,
@@ -173,12 +181,12 @@ def parse_args(argv=None):
 
     g = p.add_argument_group("instrument")
     g.add_argument("--probe", choices=probe_prompts.PROBE_KINDS, default="openended",
-                   help="which of the paper's prompt types to administer. Only "
-                        "`openended` is ported; the rest refuse rather than "
-                        "approximate (see syco/prompts.py)")
+                   help="paper probe to administer: openended, 4dims, or "
+                        "supporttypes (default: openended)")
     g.add_argument("--n-models", type=positive_int,
                    default=probe_prompts.DEFAULT_N_MODELS,
-                   help="how many mental models to ask for (paper: 3)")
+                   help="openended only: how many mental models to ask for "
+                        "(paper: 3; ignored by structured probes)")
     g.add_argument("--system", default="",
                    help="system prompt, applied to every cell (default: none)")
 

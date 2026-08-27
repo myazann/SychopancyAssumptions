@@ -367,6 +367,38 @@ class ParsedStructured:
     def n_dimensions(self) -> int:
         return len(self.beliefs)
 
+    @property
+    def n_scored(self) -> int:
+        return sum(belief.score is not None for belief in self.beliefs)
+
+
+STRUCTURED_LEAN_COLUMNS = (
+    "run_id", "probe", "persona_type", "persona_id",
+    "prompt_type", "prompt_id", "rep",
+    "dimension", "score", "explanation", "parse_status", "has_response",
+)
+
+
+def _to_structured_score(value) -> Optional[float]:
+    """Read a 0-1 score without treating an out-of-range decimal as percent.
+
+    A literal ``70%`` is unambiguous and accepted as 0.7. A bare ``1.2`` is
+    invalid for this instrument, rather than being silently reinterpreted as
+    1.2%.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+    else:
+        text = str(value).strip().strip("\"'")
+        percent = _PERCENT_RE.match(text)
+        try:
+            number = float(percent.group(1)) / 100.0 if percent else float(text)
+        except ValueError:
+            return None
+    return number if 0.0 <= number <= 1.0 else None
+
 
 def parse_structured(raw: str, kind: str) -> ParsedStructured:
     """Pull `mental_model.<container>.<dimension>.{score, explanation}` out.
@@ -385,7 +417,11 @@ def parse_structured(raw: str, kind: str) -> ParsedStructured:
     container = STRUCTURED_CONTAINER[kind]
 
     if not raw or not raw.strip():
-        return ParsedStructured(status=FAILED, notes="empty completion")
+        return ParsedStructured(
+            status=FAILED,
+            beliefs=[Belief(dimension, None, "") for dimension in wanted],
+            notes="empty completion",
+        )
 
     head, response, has_response = _split_response(raw)
     result = ParsedStructured(
@@ -395,6 +431,8 @@ def parse_structured(raw: str, kind: str) -> ParsedStructured:
 
     notes = []
     payload = None
+    repaired = False
+    after_response = False
     for source, note in ((head, ""), (raw, "block after RESPONSE")):
         block = _find_json_object(source, _STRUCTURED_KEY)
         if block is None:
@@ -402,22 +440,26 @@ def parse_structured(raw: str, kind: str) -> ParsedStructured:
             block = fenced.group(1).strip() if fenced else None
         if block is None:
             continue
+        decorated = source.strip() != block.strip()
         for candidate, repair in ((block, ""),
                                   (_TRAILING_COMMA_RE.sub(r"\1", block), "trailing comma")):
             try:
-                payload = json.loads(candidate)
+                payload = json.loads(candidate, strict=False)
             except Exception:
                 continue
             if repair:
                 notes.append(repair)
+            repaired = decorated or bool(repair)
             break
         if payload is not None:
             if note:
                 notes.append(note)
+                after_response = True
             break
 
     if payload is None:
         result.status = FAILED
+        result.beliefs = [Belief(dimension, None, "") for dimension in wanted]
         result.notes = "; ".join(notes + ["no JSON object found"])
         return result
 
@@ -438,22 +480,29 @@ def parse_structured(raw: str, kind: str) -> ParsedStructured:
 
     if not isinstance(scope, dict):
         result.status = FAILED
+        result.beliefs = [Belief(dimension, None, "") for dimension in wanted]
         result.notes = "; ".join(notes + ["no dimension object found"])
         return result
 
     found = 0
+    invalid = []
     for dimension in wanted:
         entry = scope.get(dimension)
         if isinstance(entry, dict):
-            score = _to_float(entry.get("score"))
+            raw_score = entry.get("score")
+            score = _to_structured_score(raw_score)
             explanation = str(entry.get("explanation") or "").strip()
+            if raw_score is not None and score is None:
+                invalid.append(dimension)
         elif entry is None:
             score, explanation = None, ""
         else:
             # A model that emitted a bare number instead of {score, explanation}.
-            score, explanation = _to_float(entry), ""
+            score, explanation = _to_structured_score(entry), ""
             if score is not None:
                 notes.append(f"{dimension}: bare score")
+            else:
+                invalid.append(dimension)
         if score is not None:
             found += 1
         result.beliefs.append(Belief(dimension, score, explanation))
@@ -461,24 +510,29 @@ def parse_structured(raw: str, kind: str) -> ParsedStructured:
     missing = [b.dimension for b in result.beliefs if b.score is None]
     if missing:
         notes.append(f"missing score(s): {', '.join(missing)}")
-    out_of_range = [b.dimension for b in result.beliefs
-                    if b.score is not None and not 0.0 <= b.score <= 1.0]
-    if out_of_range:
-        notes.append(f"score(s) outside 0-1: {', '.join(out_of_range)}")
+    if invalid:
+        notes.append(f"invalid score(s): {', '.join(invalid)}")
 
     if found == 0:
         result.status = FAILED
-    elif missing or out_of_range:
+    elif after_response:
+        result.status = INVALID_ORDER
+    elif missing:
         result.status = SALVAGED
-    elif notes:
+    elif repaired or notes:
         result.status = REPAIRED
     else:
         result.status = CLEAN
+    if result.beliefs and not result.has_response:
+        missing_response = "empty RESPONSE" if has_response else "no RESPONSE heading"
+        notes.append(missing_response)
     result.notes = "; ".join(notes)
     return result
 
 
-def to_structured_records(row: dict, parsed: ParsedStructured) -> list:
+def to_structured_records(
+    row: dict, parsed: ParsedStructured, full: bool = False
+) -> list:
     """One tidy record per scored dimension, with the cell's design columns."""
     record = {
         "cell_key": row.get("cell_key"),
@@ -492,12 +546,19 @@ def to_structured_records(row: dict, parsed: ParsedStructured) -> list:
         "persona_turns": row.get("persona_turns"),
         "persona_recovered": row.get("persona_recovered"),
         "parse_status": parsed.status,
+        "n_dimensions_asked": row.get("n_dimensions_asked"),
         "n_dimensions": parsed.n_dimensions,
+        "n_scored": parsed.n_scored,
         "has_response": parsed.has_response,
         "response_chars": len(parsed.response),
         "parse_notes": parsed.notes,
     }
     if not parsed.beliefs:
-        return [dict(record, dimension=None, score=None, explanation=None)]
-    return [dict(record, dimension=b.dimension, score=b.score,
-                 explanation=b.explanation) for b in parsed.beliefs]
+        rows = [dict(record, dimension=None, score=None, explanation=None)]
+    else:
+        rows = [dict(record, dimension=b.dimension, score=b.score,
+                     explanation=b.explanation) for b in parsed.beliefs]
+    if full:
+        return rows
+    return [{key: result[key] for key in STRUCTURED_LEAN_COLUMNS}
+            for result in rows]

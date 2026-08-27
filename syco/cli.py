@@ -18,11 +18,11 @@ Commands:
   run --all              schedule every profile model across available GPUs
   status                 show successful, missing, error, and attempt counts
   merge                  validate and merge canonical per-model outputs
-  parse INPUT ...        parse one JSONL output
+  parse INPUT ...        parse one open-ended or structured JSONL output
   parse --all            parse every per-model output independently
-  summarize INPUT ...    summarize one parsed assumptions table
+  summarize INPUT ...    summarize one parsed assumptions/scores table
   summarize --all        summarize every per-model parsed table
-  topics INPUT ...       words, bigrams, and topics of one parsed table
+  topics INPUT ...       open-ended only: words, bigrams, and topics
   topics --all           the same for every per-model parsed table
   pipeline               run-all, merge, parse-all, summarize-all, topics-all
 

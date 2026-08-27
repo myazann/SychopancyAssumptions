@@ -1,15 +1,21 @@
+import sys
 from types import SimpleNamespace
 
 import pytest
 
-from syco.model_registry import ModelSpec, Reasoning
+from syco.experiments import load_profile
+from syco.model_registry import ModelSpec, Reasoning, load_registry
 from syco.models import (
     AnthropicAdapter,
     ChatAdapter,
     Conversation,
+    LlamaCppAdapter,
+    MockAdapter,
     OpenAIAdapter,
     _retry,
 )
+from syco.parse import CLEAN, parse_completion, parse_structured
+from syco.prompts import ProbeSpec, build
 
 
 def _adapter(adapter_type, spec, client):
@@ -17,6 +23,84 @@ def _adapter(adapter_type, spec, client):
     ChatAdapter.__init__(adapter, spec)
     adapter.client = client
     return adapter
+
+
+def test_llamacpp_forwards_l40_runtime_options(monkeypatch, tmp_path):
+    calls = []
+
+    class RecordingLlama:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+    fake_module = SimpleNamespace(Llama=RecordingLlama)
+    monkeypatch.setitem(sys.modules, "llama_cpp", fake_module)
+    monkeypatch.setattr(
+        "syco.models.ChatTemplateRenderer",
+        lambda *args, **kwargs: SimpleNamespace(),
+    )
+    model_path = tmp_path / "model.gguf"
+    monkeypatch.setattr(LlamaCppAdapter, "_ensure_local_file", lambda self: model_path)
+    spec = ModelSpec(
+        alias="local",
+        family="llama",
+        ref=str(model_path),
+        backend="llamacpp",
+        tokenizer_id="tokenizer",
+        runtime={
+            "n_ctx": 8192,
+            "n_gpu_layers": -1,
+            "flash_attn": True,
+            "n_batch": 2048,
+            "n_ubatch": 512,
+            "n_threads": 8,
+            "n_threads_batch": 8,
+        },
+    )
+
+    adapter = LlamaCppAdapter(spec)
+
+    assert adapter.n_ctx == 8192
+    assert calls == [{
+        "model_path": str(model_path),
+        "verbose": False,
+        "n_ctx": 8192,
+        "n_gpu_layers": -1,
+        "n_batch": 2048,
+        "n_ubatch": 512,
+        "n_threads": 8,
+        "n_threads_batch": 8,
+        "flash_attn": True,
+    }]
+
+
+def test_llamacpp_rejects_unknown_runtime_option_before_loading(monkeypatch):
+    monkeypatch.setitem(sys.modules, "llama_cpp", SimpleNamespace(Llama=object))
+    spec = ModelSpec(
+        alias="local",
+        family="llama",
+        ref="model.gguf",
+        backend="llamacpp",
+        runtime={"flash_attention": True},
+    )
+
+    with pytest.raises(ValueError, match="unsupported.*flash_attention"):
+        LlamaCppAdapter(spec)
+
+
+def test_default_profile_models_inherit_l40_runtime_tuning():
+    registry = load_registry()
+    specs = load_profile("default").select_models(registry)
+
+    assert len(specs) == 5
+    for spec in specs:
+        assert spec.backend == "llamacpp"
+        assert spec.runtime["flash_attn"] is True
+        assert spec.runtime["n_batch"] == 2048
+        assert spec.runtime["n_ubatch"] == 512
+        assert spec.runtime["n_threads"] == 8
+        assert spec.runtime["n_threads_batch"] == 8
+    assert registry.get("Gemma3-27B").runtime["n_ctx"] == 8192
+    assert registry.get("Gemma3-12B").runtime["n_ctx"] == 16384
 
 
 class RecordingResponses:
@@ -167,3 +251,31 @@ def test_retry_fails_fast_on_local_request_shape_error(monkeypatch):
     with pytest.raises(TypeError):
         _retry(fail)
     assert calls == 1
+
+
+@pytest.mark.parametrize(
+    "kind,expected_outputs",
+    [("openended", 3), ("4dims", 4), ("supporttypes", 5)],
+)
+def test_mock_adapter_emits_the_selected_probe_schema(kind, expected_outputs):
+    spec = ModelSpec(
+        alias="mock",
+        family="mock",
+        ref="mock",
+        backend="mock",
+    )
+    probe = ProbeSpec(kind=kind)
+    messages = build(probe, [], "Was I wrong?")
+    raw = MockAdapter(spec).chat(Conversation(messages=tuple(messages)))[0]
+
+    if probe.family == "open-ended":
+        parsed = parse_completion(raw, expected_n=probe.n_models)
+        assert parsed.status == CLEAN
+        assert parsed.n_assumptions == expected_outputs
+    else:
+        parsed = parse_structured(raw, kind)
+        assert parsed.status == CLEAN
+        assert parsed.n_dimensions == expected_outputs
+        assert parsed.n_scored == expected_outputs
+        assert {belief.dimension for belief in parsed.beliefs} == set(probe.dimensions)
+    assert parsed.has_response is True

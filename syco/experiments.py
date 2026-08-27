@@ -7,7 +7,7 @@ from pathlib import Path
 import yaml
 
 from syco import paths
-from syco.data import load_answers, load_personas, load_prompts
+from syco.data import load_personas, load_prompts
 from syco.grid import build_cells
 from syco.model_registry import ModelRegistry, ModelSpec
 from syco.prompts import PROBE_KINDS, ProbeSpec
@@ -91,16 +91,22 @@ class ExperimentProfile:
         tag = self.probe_spec.label().replace("/", "-")
         return self.merge_dir / f"all_{tag}.jsonl"
 
+    def parsed_output_for(self, spec: ModelSpec, *, format: str = "parquet") -> Path:
+        raw = self.output_for(spec)
+        stem = str(raw).removesuffix(".jsonl")
+        return Path(f"{stem}{self.probe_spec.parsed_table_suffix}.{format}")
+
     def run_args(self, spec: ModelSpec) -> list[str]:
         args = [
             "--model", spec.alias,
             "--out", str(self.output_for(spec)),
             "--probe", self.probe_spec.kind,
-            "--n-models", str(self.probe_spec.n_models),
             "--system", str(self.probe.get("system") or ""),
             "--n-reps", str(self.design.get("n_reps", 1)),
             "--seed", str(self.design.get("seed", 1000)),
         ]
+        if self.probe_spec.family == "open-ended":
+            args.extend(("--n-models", str(self.probe_spec.n_models)))
         for key, flag in (("n_personas", "--n-personas"),
                           ("n_prompts", "--n-prompts")):
             value = self.design.get(key)
@@ -175,8 +181,11 @@ def load_profile(name_or_path: str = "default") -> ExperimentProfile:
     output = dict(doc.get("output") or {})
 
     if probe.get("kind", "openended") not in set(PROBE_KINDS):
-        raise ValueError("profile probe.kind must be openended or plain")
-    _positive("probe.n_models", probe.get("n_models", 3))
+        raise ValueError(
+            "profile probe.kind must be one of: " + ", ".join(PROBE_KINDS)
+        )
+    if probe.get("kind", "openended") == "openended":
+        _positive("probe.n_models", probe.get("n_models", 3))
     _positive("design.n_personas", design.get("n_personas"), allow_none=True)
     _positive("design.n_prompts", design.get("n_prompts"), allow_none=True)
     _positive("design.n_reps", design.get("n_reps", 1))

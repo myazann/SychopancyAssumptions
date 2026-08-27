@@ -79,7 +79,9 @@ def build_manifest(*, args, spec, probe, resolved_file=None) -> dict:
         },
         "instrument": {
             "probe": probe.kind,
-            "n_models": probe.n_models,
+            "family": probe.family,
+            "n_models": probe.n_models if probe.family == "open-ended" else None,
+            "dimensions": list(probe.dimensions),
             "system": args.system,
             "thinking": bool(args.thinking),
         },

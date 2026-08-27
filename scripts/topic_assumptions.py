@@ -223,6 +223,13 @@ def _facet_terms(ngrams: pd.DataFrame, top: int) -> tuple[pd.DataFrame, str]:
 def main(argv=None) -> int:
     args = parse_args(argv)
     df = load(args.input)
+    if "assumption" not in df.columns:
+        print(
+            "topics is only defined for open-ended free-text assumptions; "
+            "use `python -m syco summarize` for structured score tables",
+            file=sys.stderr,
+        )
+        return 2
     by = tuple(column.strip() for column in args.by.split(",") if column.strip())
 
     constants = constant_columns(df)

@@ -59,7 +59,19 @@ defaults:
       # runner errors loudly rather than silently truncating a persona.
       n_ctx: 16384
       n_gpu_layers: -1
-      n_threads: null
+      # L40S tuning, while retaining the same llama.cpp/GGUF backend. Flash
+      # attention reduces long-context attention traffic. n_batch controls how
+      # many prompt tokens llama.cpp accepts per eval; n_ubatch bounds the
+      # physical CUDA batch so the larger logical batch does not create a large
+      # transient VRAM spike.
+      flash_attn: true
+      n_batch: 2048
+      n_ubatch: 512
+      # llama-cpp-python otherwise sizes these from every CPU visible on the
+      # node, ignoring OMP_NUM_THREADS. Match run_model.sbatch's 8-CPU request
+      # so four single-GPU jobs on one node do not oversubscribe the host.
+      n_threads: 8
+      n_threads_batch: 8
     hf:
       # `auto` needs accelerate; without it the adapter loads onto CUDA, else
       # CPU. It never picks MPS on its own -- Apple's backend returns NaN logits

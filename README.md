@@ -1,7 +1,8 @@
 # SychopancyAssumptions
 
 How do personas and prompt framing move a model's answer—and what does the
-model think it is talking to when it answers?
+model think it is talking to when it answers? The pipeline supports both the
+open-ended and structured Verbalized Assumptions instruments from Cheng et al.
 
 The base data belongs in `files/` and is available from the
 [project data folder](https://drive.google.com/drive/folders/1HpBYpVgrpgjlUB6ikdQXy2vDVTUbapBu).
@@ -75,14 +76,27 @@ python -m syco run \
     --n-prompts 20
 ```
 
+Choose a structured probe with the same grid and runner:
+
+```bash
+# Four sycophancy-related belief dimensions.
+python -m syco run --model Llama-3.1-8B --probe 4dims \
+    --n-personas 25 --n-prompts 20
+
+# Five support-seeking dimensions.
+python -m syco run --model Llama-3.1-8B --probe supporttypes \
+    --n-personas 25 --n-prompts 20
+```
+
 By default this writes every model-specific artifact under
 `results/Llama-3.1-8B/`; the raw file is
 `openended3.jsonl`. Re-run the same command to resume. Use `--plan-only` to inspect it without
 loading weights, or add `--limit 10` for a ten-cell trial.
 
 The JSONL is the append-safe raw acquisition log; parsing creates a typed
-`*_assumptions.parquet` with one extracted assumption per row. Keep the raw file
-and its manifest as the reproducible source, and use Parquet for analysis. See
+`*_assumptions.parquet` for open-ended runs or `*_structured.parquet` for
+structured runs. Keep the raw file and its manifest as the reproducible source,
+and use Parquet for analysis. See
 [PIPELINE.md](PIPELINE.md#why-there-are-both-jsonl-and-parquet-files) for the
 schema and rationale.
 
@@ -100,4 +114,12 @@ python -m syco topics --all
 ```
 
 Use `--profile NAME_OR_PATH` with profile-aware commands to select another
-experiment definition.
+experiment definition. Ready-to-run structured profiles are
+`structured-4dims` and `structured-supporttypes`; for example:
+
+```bash
+python -m syco smoke --profile structured-4dims
+python -m syco run --all --profile structured-supporttypes
+python -m syco parse --all --profile structured-supporttypes
+python -m syco summarize --all --profile structured-supporttypes
+```

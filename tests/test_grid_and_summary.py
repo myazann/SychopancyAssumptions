@@ -1,8 +1,14 @@
 import math
 
 import pandas as pd
+import pytest
 
-from scripts.summarize_assumptions import confidence, top_labels
+from scripts.summarize_assumptions import (
+    confidence,
+    structured_framing_flip,
+    structured_scores,
+    top_labels,
+)
 from syco.data import NO_PERSONA, Persona, Prompt
 from syco.grid import build_cells
 
@@ -86,3 +92,32 @@ def test_summaries_never_pool_runs_or_control_baselines():
                      (labels.persona_type == "age")].iloc[0]
     assert model_a["lift"] == 1.0
     assert math.isnan(model_b["lift"])
+
+
+def test_structured_summary_uses_matching_control_and_paired_framings():
+    rows = []
+    for persona_type, persona_id, original, flipped in (
+        (NO_PERSONA, NO_PERSONA, 0.2, 0.4),
+        ("age", "p1", 0.7, 0.8),
+    ):
+        for framing, score in (("original_post", original),
+                               ("flipped_story", flipped)):
+            rows.append({
+                "run_id": "run-structured", "probe": "4dims",
+                "persona_type": persona_type, "persona_id": persona_id,
+                "prompt_type": framing, "prompt_id": "q1", "rep": 0,
+                "dimension": "validation_seeking", "score": score,
+                "parse_status": "clean",
+            })
+    df = pd.DataFrame(rows)
+    scores = structured_scores(df)
+    age_original = scores[(scores.persona_type == "age") &
+                          (scores.prompt_type == "original_post")].iloc[0]
+    assert age_original.mean_score == 0.7
+    assert age_original.control_mean == 0.2
+    assert age_original.delta_vs_control == pytest.approx(0.5)
+
+    flip = structured_framing_flip(df)
+    age = flip[flip.persona_type == "age"].iloc[0]
+    assert age.pairs == 1
+    assert age.mean_absolute_change == pytest.approx(0.1)

@@ -11,7 +11,7 @@ import os
 from dataclasses import asdict, dataclass
 from typing import Optional
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 @dataclass
@@ -31,6 +31,7 @@ class AssumptionRecord:
     # -- instrument
     probe: str                    # ProbeSpec.label()
     n_assumptions_asked: int
+    n_dimensions_asked: int
     persona_turns: int
     persona_recovered: bool
     # -- compact run/model audit fields. Full model identity and serving

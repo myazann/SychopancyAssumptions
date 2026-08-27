@@ -1,17 +1,29 @@
-# Open-ended verbalized assumptions
+# Verbalized assumptions: open-ended and structured
 
-Runs the open-ended assumptions probe from Cheng et al., *Verbalizing LLMs'
-assumptions to explain and control sycophancy* (vendored under
+Runs the open-ended and structured assumptions probes from Cheng et al.,
+[*Verbalizing LLMs' assumptions to explain and control
+sycophancy*](https://arxiv.org/abs/2604.03058) (vendored under
 [verbalizedassumptions/](verbalizedassumptions/)) over this repo's persona x
 dilemma design, through the model layer from
 [myazan/LLM-Self-Concept](https://github.com/myazan/LLM-Self-Concept).
 
-## The probe
+## Choose the probe
 
-Before answering, the model states its top-k mental models of the user with
-probabilities, then replies under a `RESPONSE:` heading. Assumptions come
-**first** — that ordering is the method. An assumption written after the answer
-would be a rationalization of a reply already committed to.
+| `probe.kind` / `--probe` | output | use |
+|---|---|---|
+| `openended` | top-k free-text mental models with probabilities summing to 1 | inductive content analysis |
+| `4dims` | validation seeking, user rightness, user information advantage, objectivity seeking | quantitative comparison on sycophancy-related beliefs |
+| `supporttypes` | emotional, companionship, belonging, information/guidance, and tangible support seeking | quantitative comparison on support intent |
+
+The two structured probes are separate in the paper and in its reference code.
+Run both to collect all nine dimensions; combining them into one prompt would be
+a new instrument. Structured scores are independent 0–1 beliefs and are not
+normalized to sum to 1.
+
+Before answering, the model states its assumptions, then replies under a
+`RESPONSE:` heading. Assumptions come **first** — that ordering is the method.
+An assumption written after the answer would be a rationalization of a reply
+already committed to.
 
 The question this design puts to it: the same person, the same dilemma, ten
 different facets of them disclosed. What the model says it is talking to, and
@@ -46,9 +58,10 @@ flattened to `User: ... / AI: ...` text and placed in a `Conversation so far:
 """..."""` block inside a single user message; the dilemma follows under
 `User A now says:`; the model is addressed as a third party observing "User A".
 
-`syco/prompts.py` is a verbatim copy of the vendored `build_prompt_openended`,
-and `tests/test_prompts.py` diffs it against that source character for
-character. If the two ever drift, the suite fails.
+`syco/prompts.py` contains verbatim copies of the vendored
+`build_prompt_openended`, `build_prompt_4dims`, and `build_prompt_supporttypes`.
+`tests/test_prompts.py` diffs each against that source character for character.
+If any drift, the suite fails.
 
 An earlier version of this repo also had a `--history-mode native` that sent the
 transcript as real chat turns and addressed the model as the user's
@@ -81,6 +94,12 @@ python -m syco run --model Gemma3-12B --plan-only \
 python -m syco run --model Gemma3-12B --dry-run \
     --n-personas 2 --n-prompts 2
 
+# the same experiment design with either structured instrument
+python -m syco run --model Gemma3-12B --probe 4dims --dry-run \
+    --n-personas 2 --n-prompts 2
+python -m syco run --model Gemma3-12B --probe supporttypes --dry-run \
+    --n-personas 2 --n-prompts 2
+
 # the real thing, on cells the existing answers table already covers
 python -m syco run --model Gemma3-12B \
     --n-personas 25 --n-prompts 20
@@ -88,7 +107,22 @@ python -m syco run --model Gemma3-12B \
 python -m syco parse     results/Gemma3-12B/openended3.jsonl
 python -m syco summarize results/Gemma3-12B/openended3_assumptions.parquet
 python -m syco topics    results/Gemma3-12B/openended3_assumptions.parquet
+
+python -m syco parse     results/Gemma3-12B/4dims.jsonl
+python -m syco summarize results/Gemma3-12B/4dims_structured.parquet
 ```
+
+The bundled `structured-4dims` and `structured-supporttypes` profiles use the
+same model list and paired persona × dilemma design as `default`:
+
+```bash
+python -m syco smoke --profile structured-4dims
+python -m syco run --all --profile structured-supporttypes
+python -m syco pipeline --profile structured-supporttypes
+```
+
+For structured profiles, `pipeline` ends after the numeric summary; topic
+modeling is skipped because the dimensions are fixed rather than free text.
 
 `requirements.txt` lists its runtime packages explicitly. See README.md for
 virtual-environment setup, the CUDA-enabled `llama-cpp-python` build, developer
@@ -123,7 +157,7 @@ a time, since its KV cache is shared state.
 
 ## Output
 
-The probe asks, in the paper's own words, for the top three mental models as
+The open-ended probe asks, in the paper's own words, for the top three mental models as
 JSON with probabilities summing to 1, then the reply under a `RESPONSE:`
 heading. The probe label on every row is the paper's prompt-type name plus the
 model count, for example `openended3`.
@@ -133,6 +167,12 @@ Markdown fences/headings, trailing commas, string/percentage probabilities,
 common alternate JSON keys, truncated JSON entries, and numbered Markdown
 field lists. Every repair is retained in `parse_status`/`parse_notes`; an output
 with the wrong number of assumptions is extracted but explicitly flagged.
+
+Structured probes instead produce one tidy row per requested dimension with
+`dimension`, `score`, and `explanation`. Missing or invalid scores remain as
+null rows rather than disappearing. `summarize` reports parse health, mean score
+and delta from the matching persona-free control for every dimension/facet/
+framing, plus score movement under the flipped-story condition.
 
 ### Why there are both JSONL and Parquet files
 
@@ -149,6 +189,9 @@ They have different roles and are not two competing sources of truth:
   assumption, including `assumption`, `description`, `probability`, normalized
   probability, design coordinates, and parse status. Parquet preserves types,
   compresses well, and is efficient for grouping and topic analysis.
+- `*_structured.parquet` is the corresponding derived table for a structured
+  run: one row per fixed dimension and cell, with its independent 0–1 score and
+  explanation. These scores are never renormalized.
 
 Do not copy parsed assumptions back into the raw JSONL: doing so would duplicate
 data and leave stale extractions after parser improvements. Keep raw JSONL plus
@@ -163,6 +206,9 @@ that parses noticeably worse than the others differs in format compliance, and
 that difference will masquerade as a finding in everything downstream.
 
 ## What the assumptions are about
+
+This section applies only to open-ended assumptions. Structured runs already
+share fixed dimensions and use `summarize` rather than `topics`.
 
 `summarize_assumptions.py` counts assumption labels as exact strings, so
 "wants validation" and "seeking validation" are two rows. `topic_assumptions.py`
@@ -257,9 +303,9 @@ decision.
 - **Sycophancy scoring of the replies.** The paper's 5-point social sycophancy
   judge is at `verbalizedassumptions/elephant_scorer_5pointscale.py`; the parsed
   `response` column (`--keep-response`) is what it would score.
-- **The other probes.** `get_assumptions.py` also has `4dims`, `supporttypes`
-  and two-step variants. `syco/prompts.py` is where they would go — the runner
-  takes whatever `ProbeSpec` builds.
+- **Reasoning/two-step variants.** The reference also contains `twostep`,
+  `ten`, and `supporttypestwostep`. They remain unported rather than being
+  approximated from the three character-for-character tested instruments.
 
 ## Experiment profiles and orchestration
 

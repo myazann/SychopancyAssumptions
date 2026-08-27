@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from syco.experiments import ExperimentProfile
 from syco.model_registry import ModelSpec
 from syco.orchestrate import GPU, run_all
 
@@ -96,3 +97,22 @@ def test_explicit_model_list_is_run_in_the_order_written(tmp_path, monkeypatch):
 
     run_all(profile)
     assert launches == ["small", "large", "medium"]
+
+
+def test_structured_profile_uses_probe_specific_paths_and_arguments(tmp_path):
+    spec = _spec("model", 4_000)
+    profile = ExperimentProfile(
+        name="structured",
+        path=tmp_path / "structured.yaml",
+        model_selection=(spec.alias,),
+        probe={"kind": "4dims", "n_models": 99},
+        design={"n_reps": 1, "seed": 1000},
+        execution={},
+        output={"results_dir": str(tmp_path / "results")},
+    )
+
+    assert profile.output_for(spec).name == "4dims.jsonl"
+    assert profile.parsed_output_for(spec).name == "4dims_structured.parquet"
+    args = profile.run_args(spec)
+    assert args[args.index("--probe") + 1] == "4dims"
+    assert "--n-models" not in args

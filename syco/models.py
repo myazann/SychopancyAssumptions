@@ -347,6 +347,20 @@ class LlamaCppAdapter(ChatAdapter):
     rather than a speedup. Use the `hf` backend for throughput.
     """
 
+    # Runtime settings that map directly to llama_cpp.Llama.__init__. Keep this
+    # list explicit: ModelSpec.runtime is shared by all backends, and forwarding
+    # arbitrary configuration would turn a misspelling into an opaque binding
+    # error after the multi-GB model has loaded.
+    _RUNTIME_KWARGS = (
+        "n_ctx",
+        "n_gpu_layers",
+        "n_batch",
+        "n_ubatch",
+        "n_threads",
+        "n_threads_batch",
+        "flash_attn",
+    )
+
     def __init__(self, spec: ModelSpec):
         super().__init__(spec)
         try:
@@ -357,22 +371,29 @@ class LlamaCppAdapter(ChatAdapter):
                 "with --dry-run to exercise the pipeline offline."
             ) from err
 
+        runtime = spec.runtime
+        unknown = sorted(set(runtime) - set(self._RUNTIME_KWARGS))
+        if unknown:
+            raise ValueError(
+                f"{spec.alias}: unsupported llama.cpp runtime option(s): "
+                + ", ".join(unknown)
+            )
+
         # Validate/download the tiny tokenizer before touching multi-GB weights,
         # so a gated or mistyped tokenizer repo fails in seconds, not after a
         # model download.
         self.renderer = ChatTemplateRenderer(spec.tokenizer_id or spec.hf_id, required=True)
 
         model_path = self._ensure_local_file()
-        runtime = spec.runtime
         kwargs = {
             "model_path": str(model_path),
-            "n_ctx": runtime.get("n_ctx", 16384),
-            "n_gpu_layers": runtime.get("n_gpu_layers", -1),
             "verbose": False,
         }
-        threads = runtime.get("n_threads")
-        if threads:
-            kwargs["n_threads"] = threads
+        defaults = {"n_ctx": 16384, "n_gpu_layers": -1}
+        for name in self._RUNTIME_KWARGS:
+            value = runtime.get(name, defaults.get(name))
+            if value is not None:
+                kwargs[name] = value
         self.llm = Llama(**kwargs)
         self.n_ctx = kwargs["n_ctx"]
 

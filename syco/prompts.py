@@ -19,9 +19,9 @@ real chat turns and addressed the model as the user's interlocutor. That was
 not the paper's instrument and it is gone; runs made with it measured something
 else and cannot be pooled with these.
 
-Ported so far: `openended`, `4dims`, `supporttypes`. The remaining prompt
-types are deliberately absent rather than approximated. All names are from the
-paper's own `AVAILABLE_PROMPTS`:
+Selectable probes: `openended`, `4dims`, `supporttypes`. The remaining prompt
+types in the reference implementation are deliberately absent rather than
+approximated:
 
   open-ended  `openended` (here), `ten`, `twostep` -- free-text assumptions
       with probabilities. The paper uses these for characterization only
@@ -47,10 +47,16 @@ from dataclasses import dataclass
 
 DEFAULT_N_MODELS = 3
 
-#: The paper's own `AVAILABLE_PROMPTS` keys, grouped by what they produce.
-OPEN_ENDED = ("openended", "ten", "twostep")
-STRUCTURED = ("4dims", "supporttypes", "supporttypestwostep")
+#: The paper prompt types this project exposes as runnable probes.
+OPEN_ENDED = ("openended",)
+STRUCTURED = ("4dims", "supporttypes")
 PROBE_KINDS = OPEN_ENDED + STRUCTURED
+
+# Names present in the paper's reference code but intentionally not exposed as
+# runnable options here. Keeping this list documents the boundary without
+# letting argparse accept a probe that fails only after an expensive model has
+# been loaded.
+UNPORTED_PROBE_KINDS = ("ten", "twostep", "supporttypestwostep")
 
 
 def _count_word(n: int) -> str:
@@ -260,13 +266,23 @@ class ProbeSpec:
     def __post_init__(self):
         if self.kind not in PROBE_KINDS:
             raise ValueError(
-                f"unknown probe kind {self.kind!r}; the paper's prompt types are "
+                f"unknown probe kind {self.kind!r}; selectable prompt types are "
                 f"{', '.join(PROBE_KINDS)}"
             )
 
     @property
     def family(self) -> str:
         return "open-ended" if self.kind in OPEN_ENDED else "structured"
+
+    @property
+    def dimensions(self) -> tuple[str, ...]:
+        """Fixed output dimensions, empty for an open-ended probe."""
+        return STRUCTURED_DIMENSIONS.get(self.kind, ())
+
+    @property
+    def parsed_table_suffix(self) -> str:
+        """Suffix used by the parser and profile-aware downstream commands."""
+        return "_structured" if self.family == "structured" else "_assumptions"
 
     def label(self) -> str:
         return f"{self.kind}{self.n_models}" if self.kind == "openended" else self.kind
@@ -289,11 +305,6 @@ def build(spec: ProbeSpec, persona_messages, post_text: str) -> list:
         body = build_prompt_4dims(history, post_text)
     elif spec.kind == "supporttypes":
         body = build_prompt_supporttypes(history, post_text)
-    else:
-        raise NotImplementedError(
-            f"{spec.kind!r} is one of the paper's prompt types but is not ported. "
-            f"Copy it verbatim from verbalizedassumptions/verbalized_assumptions/"
-            f"get_assumptions.py and extend tests/test_prompts.py to diff it -- do "
-            f"not approximate it from another probe, the templates differ."
-        )
+    else:  # pragma: no cover - ProbeSpec validates this before dispatch
+        raise AssertionError(f"unhandled probe kind: {spec.kind}")
     return [{"role": "user", "content": body}]

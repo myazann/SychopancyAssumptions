@@ -22,6 +22,9 @@ The header it prints is the first thing to read after a run. `clean` /
 persona facet parses noticeably worse than the others, differences between
 facets are partly differences in how well the model followed the format, and
 that has to be handled before any of it is read as a finding.
+
+Structured runs use the same command and write `*_structured.parquet`, with
+one row per fixed dimension (`dimension`, `score`, `explanation`).
 """
 from __future__ import annotations
 
@@ -34,10 +37,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pandas as pd
 
-from syco.parse import (parse_completion, parse_structured, to_records,
-                        to_structured_records)
-from syco.store import canonical_rows, read_rows
+from syco.parse import (
+    parse_completion,
+    parse_structured,
+    to_records,
+    to_structured_records,
+)
 from syco.prompts import STRUCTURED_DIMENSIONS
+from syco.store import canonical_rows, read_rows
 
 
 def parse_args(argv=None):
@@ -77,7 +84,7 @@ def _parse_structured_file(args, rows, kind, attempt_counts) -> int:
         if row.get("error"):
             error_count += 1
         parsed = parse_structured(row.get("raw", ""), kind)
-        records.extend(to_structured_records(row, parsed))
+        records.extend(to_structured_records(row, parsed, full=args.full))
         status_counts[parsed.status] += 1
         by_facet.setdefault(row.get("persona_type"), Counter())[parsed.status] += 1
         cell = {k: row.get(k) for k in (
@@ -87,7 +94,9 @@ def _parse_structured_file(args, rows, kind, attempt_counts) -> int:
             "error", "timestamp",
         )}
         cell["attempt_count"] = attempt_counts.get(row.get("cell_key"), 1)
+        cell["n_dimensions_asked"] = row.get("n_dimensions_asked")
         cell.update(parse_status=parsed.status, n_dimensions=parsed.n_dimensions,
+                    n_scored=parsed.n_scored,
                     has_response=parsed.has_response,
                     response_chars=len(parsed.response),
                     raw_chars=len(row.get("raw", "")), parse_notes=parsed.notes)
@@ -97,7 +106,7 @@ def _parse_structured_file(args, rows, kind, attempt_counts) -> int:
 
     beliefs = pd.DataFrame(records)
     cells = pd.DataFrame(cell_records)
-    default_prefix = args.input[:-6] if args.input.endswith(".jsonl") else args.input
+    default_prefix = args.input.removesuffix(".jsonl")
     prefix = args.out_prefix or default_prefix
     writers = {
         "parquet": lambda df, path: df.to_parquet(path, index=False),
@@ -113,23 +122,49 @@ def _parse_structured_file(args, rows, kind, attempt_counts) -> int:
 
     n_cells = len(cells)
     total = sum(status_counts.values()) or 1
-    print(f"{n_cells} cell(s) -> {len(beliefs)} scored dimension(s)  [probe: {kind}]")
+    scored_count = int(beliefs["score"].notna().sum()) if "score" in beliefs else 0
+    print(
+        f"{n_cells} cell(s) -> {len(beliefs)} dimension row(s), "
+        f"{scored_count} scored  [probe: {kind}]"
+    )
+    if attempt_counts and sum(attempt_counts.values()) > n_cells:
+        print(
+            f"attempt history: {sum(attempt_counts.values())} row(s), "
+            f"{sum(count > 1 for count in attempt_counts.values())} retried cell(s), "
+            f"{sum(max(0, count - 1) for count in attempt_counts.values())} "
+            "superseded attempt(s)"
+        )
     print("parse status: " + ", ".join(
         f"{name}={count} ({count / total:.1%})"
         for name, count in status_counts.most_common()))
     if error_count:
-        print(f"generation errors: {error_count}")
+        print(f"unresolved errors: {error_count} ({error_count / max(n_cells, 1):.1%})")
     scored = beliefs.dropna(subset=["score"]) if "score" in beliefs else beliefs
     if len(scored):
         print("\nmean score per dimension")
         print(scored.groupby("dimension")["score"].agg(["count", "mean", "std"])
               .to_string(float_format=lambda v: f"{v:.3f}"))
+    worst = sorted(
+        (
+            (
+                facet,
+                (counts.get("failed", 0) + counts.get("invalid_order", 0))
+                / max(sum(counts.values()), 1),
+            )
+            for facet, counts in by_facet.items()
+        ),
+        key=lambda item: -item[1],
+    )
+    if worst and worst[0][1] > 0:
+        print("failure rate by persona facet (highest first): " + ", ".join(
+            f"{facet}={rate:.1%}" for facet, rate in worst[:5] if rate > 0
+        ))
     print(f"\nwrote {out}")
     if args.cells or args.keep_response:
         cells_out = f"{prefix}_cells.{args.format}"
         write(cells, cells_out)
         print(f"      {cells_out}")
-    return 0
+    return 1 if error_count else 0
 
 
 def main(argv=None) -> int:
@@ -145,11 +180,16 @@ def main(argv=None) -> int:
     # probe label is stamped on every row by the runner, so this is read from
     # the data rather than passed in and possibly mismatched.
     labels = {str(r.get("probe") or "") for r in rows}
-    structured_kinds = {k for k in STRUCTURED_DIMENSIONS
-                        if any(label == k for label in labels)}
-    if structured_kinds and len(structured_kinds) == len(labels):
-        return _parse_structured_file(args, rows, sorted(structured_kinds)[0],
-                                      attempt_counts)
+    nonempty_labels = labels - {""}
+    if len(nonempty_labels) > 1:
+        print(
+            "mixed probe labels in one raw file: " + ", ".join(sorted(nonempty_labels)),
+            file=sys.stderr,
+        )
+        return 2
+    label = next(iter(nonempty_labels), "")
+    if label in STRUCTURED_DIMENSIONS:
+        return _parse_structured_file(args, rows, label, attempt_counts)
 
     assumption_records, cell_records = [], []
     status_counts, by_facet = Counter(), {}
@@ -185,7 +225,7 @@ def main(argv=None) -> int:
     assumptions = pd.DataFrame(assumption_records)
     cells = pd.DataFrame(cell_records)
 
-    default_prefix = args.input[:-6] if args.input.endswith(".jsonl") else args.input
+    default_prefix = args.input.removesuffix(".jsonl")
     prefix = args.out_prefix or default_prefix
     # Parquet is the default because these tables get wide and long -- it keeps
     # dtypes (so `rank` stays an int and a missing probability stays null rather

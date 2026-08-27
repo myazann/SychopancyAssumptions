@@ -417,8 +417,7 @@ def summarize_all(profile: ExperimentProfile, extra: list[str] | None = None) ->
     registry = load_registry()
     rc = 0
     for spec in profile.select_models(registry):
-        raw = profile.output_for(spec)
-        parsed = Path(str(raw).removesuffix(".jsonl") + "_assumptions.parquet")
+        parsed = profile.parsed_output_for(spec)
         if not parsed.is_file():
             print(f"missing: {parsed}", file=sys.stderr)
             rc = 1
@@ -431,11 +430,17 @@ def summarize_all(profile: ExperimentProfile, extra: list[str] | None = None) ->
 def topics_all(profile: ExperimentProfile, extra: list[str] | None = None) -> int:
     from scripts.topic_assumptions import main as topics_main
 
+    if profile.probe_spec.family == "structured":
+        print(
+            "topics: skipped for structured scores; use `syco summarize --all` "
+            "for dimension-level analysis"
+        )
+        return 0
+
     registry = load_registry()
     rc = 0
     for spec in profile.select_models(registry):
-        raw = profile.output_for(spec)
-        parsed = Path(str(raw).removesuffix(".jsonl") + "_assumptions.parquet")
+        parsed = profile.parsed_output_for(spec)
         if not parsed.is_file():
             print(f"missing: {parsed}", file=sys.stderr)
             rc = 1
@@ -469,10 +474,16 @@ def smoke(profile: ExperimentProfile, model: str | None = None) -> int:
     rc = parse_main([str(output), "--cells"])
     if rc:
         return rc
-    parsed = Path(str(output).removesuffix(".jsonl") + "_assumptions.parquet")
+    parsed = Path(
+        str(output).removesuffix(".jsonl")
+        + profile.probe_spec.parsed_table_suffix
+        + ".parquet"
+    )
     rc = summarize_main([str(parsed)])
     if rc:
         return rc
+    if profile.probe_spec.family == "structured":
+        return 0
     # The mock backend draws its labels from a fixed list, so nothing the
     # topic model finds here means anything. What is being checked is that the
     # whole path runs offline: n-grams always, and BERTopic too when the

@@ -14,8 +14,14 @@ import re
 
 import pytest
 
-from syco.prompts import (ProbeSpec, build, build_prompt_4dims,
-                          build_prompt_openended, build_prompt_supporttypes)
+from syco.prompts import (
+    UNPORTED_PROBE_KINDS,
+    ProbeSpec,
+    build,
+    build_prompt_4dims,
+    build_prompt_openended,
+    build_prompt_supporttypes,
+)
 
 VENDORED = (pathlib.Path(__file__).resolve().parents[1]
             / "verbalizedassumptions" / "verbalized_assumptions"
@@ -100,9 +106,19 @@ def test_structured_dimension_keys_appear_in_their_own_prompt():
             assert f'"{dim}"' in text, f"{kind}: {dim} not in prompt"
 
 
-def test_unported_probes_refuse_rather_than_approximate():
-    with pytest.raises(NotImplementedError, match="not ported"):
-        build(ProbeSpec(kind="twostep"), [], POST)
+@pytest.mark.parametrize("kind", UNPORTED_PROBE_KINDS)
+def test_unported_probes_are_not_selectable(kind):
+    with pytest.raises(ValueError, match="unknown probe kind"):
+        ProbeSpec(kind=kind)
+
+
+@pytest.mark.parametrize("kind,count", [("4dims", 4), ("supporttypes", 5)])
+def test_structured_probe_metadata(kind, count):
+    spec = ProbeSpec(kind=kind)
+    assert spec.family == "structured"
+    assert len(spec.dimensions) == count
+    assert spec.parsed_table_suffix == "_structured"
+    assert spec.label() == kind
 
 
 def test_invented_probe_names_are_rejected():
