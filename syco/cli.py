@@ -24,8 +24,10 @@ Commands:
   summarize --all        summarize every per-model parsed table
   topics INPUT ...       open-ended only: words, bigrams, and topics
   topics --all           the same for every per-model parsed table
-  sycophancy STAGE ...   score a results table and join it to assumptions
-                         (stages: binary, long, join, words)
+  sycophancy STAGE ...   score forced-choice answers and join assumptions
+                         (stages: binary, join)
+  text STAGE ...         analyze persona or response text descriptively
+                         (stages: features, words)
   pipeline               run-all, merge, parse-all, summarize-all, topics-all
 
 Profile commands default to config/experiments/default.yaml. Override with:
@@ -57,7 +59,7 @@ def _models() -> int:
         vram = spec.estimated_vram_mib or "-"
         print(
             f"{spec.alias:<22} {spec.family:<8} {spec.backend:<10} "
-            f"{spec.quantization.label:<14} {str(vram):<9} {spec.ref}{flag}"
+            f"{spec.quantization.label:<14} {vram!s:<9} {spec.ref}{flag}"
         )
     return 0
 
@@ -160,6 +162,9 @@ def main(argv: list[str] | None = None) -> int:
         if command == "sycophancy":
             from scripts.score_sycophancy import main as sycophancy_main
             return sycophancy_main(rest)
+        if command == "text":
+            from scripts.analyze_text import main as text_main
+            return text_main(rest)
         if command == "plan":
             from syco.orchestrate import plan
             parser = _profile_parser("Plan every model in a profile")

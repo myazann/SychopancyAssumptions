@@ -14,8 +14,10 @@ The base data belongs in `files/` and is available from the
 - `config/models.yaml` defines model aliases, backends, and VRAM estimates.
 - `config/experiments/default.yaml` defines the default experiment.
 - `syco/` contains the data, model, scheduling, manifest, and parsing logic.
-- `syco/sycophancy.py` scores both answer tables and joins the result to the
-  parsed assumptions.
+- `syco/sycophancy.py` scores the forced-choice answer table and joins the
+  result to parsed assumptions.
+- `syco/text_analysis.py` provides descriptive text features and marked-word
+  associations for either persona text or model responses.
 - `scripts/` contains the command implementations used by the CLI.
 - `tests/` covers providers, parsing, resume safety, summaries, content
   analysis, and scheduling.
@@ -115,13 +117,25 @@ python -m syco summarize --all
 python -m syco topics --all
 ```
 
-Score sycophancy on the collected answer tables and rank the assumptions by it:
+Score sycophancy from the constrained Yes/No collection and rank assumptions
+by that score:
 
 ```bash
 python -m syco sycophancy binary files/gemma-3-12b-it_results.pkl --out b.parquet
-python -m syco sycophancy long   files/gemma-3-12b-it_long_results.pkl --out l.parquet
 python -m syco sycophancy join   results/Gemma3-12B/openended3_assumptions.parquet \
-    --binary b.parquet --long l.parquet
+    --binary b.parquet
+```
+
+Analyze language separately. The same helpers accept persona transcripts or
+model-response columns; none of their outputs is used as a sycophancy score:
+
+```bash
+python -m syco text features files/gemma-3-12b-it_long_results.pkl \
+    --text-column model_answer --method stance --out response_features.parquet
+python -m syco text words files/base_data_persona.gz \
+    results/Gemma3-12B/openended3_assumptions.parquet \
+    --text-column persona_text --persona-role user \
+    --out persona_assumption_words.parquet
 ```
 
 See [PIPELINE.md](PIPELINE.md#sycophancy-and-which-assumptions-travel-with-it)
