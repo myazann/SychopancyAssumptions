@@ -24,6 +24,8 @@ Commands:
   summarize --all        summarize every per-model parsed table
   topics INPUT ...       open-ended only: words, bigrams, and topics
   topics --all           the same for every per-model parsed table
+  sycophancy STAGE ...   score a results table and join it to assumptions
+                         (stages: binary, long, join, words)
   pipeline               run-all, merge, parse-all, summarize-all, topics-all
 
 Profile commands default to config/experiments/default.yaml. Override with:
@@ -155,6 +157,9 @@ def main(argv: list[str] | None = None) -> int:
                 return _topics_all([item for item in rest if item != "--all"])
             from scripts.topic_assumptions import main as topics_main
             return topics_main(rest)
+        if command == "sycophancy":
+            from scripts.score_sycophancy import main as sycophancy_main
+            return sycophancy_main(rest)
         if command == "plan":
             from syco.orchestrate import plan
             parser = _profile_parser("Plan every model in a profile")

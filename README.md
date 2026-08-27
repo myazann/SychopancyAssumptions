@@ -14,6 +14,8 @@ The base data belongs in `files/` and is available from the
 - `config/models.yaml` defines model aliases, backends, and VRAM estimates.
 - `config/experiments/default.yaml` defines the default experiment.
 - `syco/` contains the data, model, scheduling, manifest, and parsing logic.
+- `syco/sycophancy.py` scores both answer tables and joins the result to the
+  parsed assumptions.
 - `scripts/` contains the command implementations used by the CLI.
 - `tests/` covers providers, parsing, resume safety, summaries, content
   analysis, and scheduling.
@@ -112,6 +114,18 @@ python -m syco parse --all
 python -m syco summarize --all
 python -m syco topics --all
 ```
+
+Score sycophancy on the collected answer tables and rank the assumptions by it:
+
+```bash
+python -m syco sycophancy binary files/gemma-3-12b-it_results.pkl --out b.parquet
+python -m syco sycophancy long   files/gemma-3-12b-it_long_results.pkl --out l.parquet
+python -m syco sycophancy join   results/Gemma3-12B/openended3_assumptions.parquet \
+    --binary b.parquet --long l.parquet
+```
+
+See [PIPELINE.md](PIPELINE.md#sycophancy-and-which-assumptions-travel-with-it)
+for what each score measures and what the join can and cannot support.
 
 Use `--profile NAME_OR_PATH` with profile-aware commands to select another
 experiment definition. Ready-to-run structured profiles are

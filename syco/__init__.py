@@ -13,6 +13,7 @@ is adapted from myazan/LLM-Self-Concept.
     syco.parse           raw completion -> mental models + reply
     syco.tables          reading a parsed table; shared analysis conventions
     syco.topics          n-grams and BERTopic over the assumption text
+    syco.sycophancy      binary and long-form sycophancy, joined to assumptions
     syco.experiments     validated experiment profiles
     syco.manifest        immutable run identity and provenance
     syco.orchestrate     multi-model scheduling and pipeline operations
@@ -28,6 +29,7 @@ __all__ = [
     "parse",
     "prompts",
     "store",
+    "sycophancy",
     "tables",
     "topics",
 ]
