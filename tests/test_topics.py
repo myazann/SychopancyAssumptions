@@ -45,16 +45,21 @@ def test_unigrams_drop_function_words_and_bigrams_keep_them():
 
 
 def _frame(rows):
-    """One tidy assumptions table; each row is (facet, person, k labels)."""
+    """One tidy assumptions table; each row is (facet, person, k labels).
+
+    The text goes in both columns: `description` is the analyzed field by
+    default (the paper's frequency tables are over the explanations), and
+    `assumption` keeps the tests that pass `field="assumption"` meaningful.
+    """
     out = []
     for facet, person, labels in rows:
         for rank, label in enumerate(labels):
             out.append({
-                "run_id": "run-1", "probe": "openended3v2/native",
-                "history_mode": "native", "persona_type": facet,
+                "run_id": "run-1", "probe": "openended3",
+                "persona_type": facet,
                 "persona_id": person, "prompt_type": "original_post",
                 "prompt_id": "q1", "rep": 0, "rank": rank,
-                "assumption": label, "description": "",
+                "assumption": label, "description": label,
             })
     return pd.DataFrame(out)
 

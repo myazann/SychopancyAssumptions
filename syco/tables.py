@@ -24,12 +24,12 @@ import pandas as pd
 
 # A cell's identity in the lean results table, which carries no cell_key.
 CELL_KEYS = (
-    "run_id", "probe", "history_mode", "persona_type",
+    "run_id", "probe", "persona_type",
     "persona_id", "prompt_type", "prompt_id", "rep",
 )
 
 # Dimensions that must never be pooled implicitly across experiments.
-MODEL_DIMENSIONS = ("run_id", "probe", "history_mode")
+MODEL_DIMENSIONS = ("run_id", "probe")
 
 _STRIP_RE = re.compile(r"[^a-z0-9 ]+")
 _LEAD_RE = re.compile(r"^(the\s+)?(user|person|they|he|she)\s+(is|wants|seeks|needs)\s+")

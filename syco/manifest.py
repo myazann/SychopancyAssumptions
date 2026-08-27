@@ -60,7 +60,6 @@ def manifest_path(output) -> Path:
 
 
 def build_manifest(*, args, spec, probe, resolved_file=None) -> dict:
-    match_path = Path(args.match_existing).resolve() if args.match_existing else None
     persona_path = paths.PERSONA_PATH.resolve()
     prompt_path = paths.PROMPT_PATH.resolve()
     identity = {
@@ -80,9 +79,7 @@ def build_manifest(*, args, spec, probe, resolved_file=None) -> dict:
         },
         "instrument": {
             "probe": probe.kind,
-            "history_mode": probe.history_mode,
             "n_models": probe.n_models,
-            "output_contract_version": probe.output_contract_version,
             "system": args.system,
             "thinking": bool(args.thinking),
         },
@@ -94,8 +91,6 @@ def build_manifest(*, args, spec, probe, resolved_file=None) -> dict:
             "n_reps": args.n_reps,
             "include_control": not args.no_control,
             "seed": args.seed,
-            "match_existing": str(match_path) if match_path else None,
-            "match_existing_sha256": _sha256_file(match_path) if match_path else None,
         },
         "data": {
             "personas": str(persona_path),

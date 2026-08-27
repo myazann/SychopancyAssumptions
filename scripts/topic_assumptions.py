@@ -82,9 +82,12 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("input", help="*_assumptions.parquet from parse_assumptions.py")
-    p.add_argument("--field", choices=TEXT_FIELDS, default="assumption",
-                   help="which text to analyze: the short label (default), its "
-                        "description, or both as separate phrases")
+    p.add_argument("--field", choices=TEXT_FIELDS, default="description",
+                   help="which text to analyze. Default `description`: the's "
+                        "paper's frequency tables are computed over the "
+                        "assumption explanations (Appendix A), not the short "
+                        "labels. `assumption` is the label alone, `both` joins "
+                        "them as separate phrases")
     p.add_argument("--top", type=int, default=15,
                    help="terms/topics to print per table (default: 15)")
     p.add_argument("--min-count", type=int, default=2,
@@ -315,7 +318,7 @@ def _topics(df: pd.DataFrame, args, tables: dict, elide=()) -> int:
     tables["topics"] = info
 
     assignments = df[[c for c in (
-        "run_id", "probe", "history_mode", "persona_type",
+        "run_id", "probe", "persona_type",
         "persona_id", "prompt_type", "prompt_id", "rep", "rank", "assumption",
     ) if c in df.columns]].copy()
     assignments["topic"] = result.assignments

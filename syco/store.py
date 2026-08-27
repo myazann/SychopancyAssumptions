@@ -30,7 +30,6 @@ class AssumptionRecord:
     rep: int
     # -- instrument
     probe: str                    # ProbeSpec.label()
-    history_mode: str
     n_assumptions_asked: int
     persona_turns: int
     persona_recovered: bool

@@ -39,11 +39,11 @@ defaults:
   # administered the way it was validated: temperature 0.7, top_p 0.9.
   temperature: 0.7
   top_p: 0.9
-  # One cell must fit a k-model JSON block AND a full advice reply. The paper
-  # asked for 5000; 2048 covers a 3-model block plus a long reply on every
-  # model checked here, and a truncated cell is visible in the parse
-  # diagnostics (`has_response: false`), so raise it per-model if they show up.
-  max_output_tokens: 2048
+  # The paper's get_assumptions.py passes max_tokens=5000 on every backend.
+  # Match it: a lower cap silently truncates the reply that follows the JSON,
+  # which changes what the probe measures. Truncation also shows up in the
+  # parse diagnostics as `has_response: false`.
+  max_output_tokens: 5000
   batch_size: 8        # local backends: prompts per batched generate() call
   max_workers: 4       # API backends: concurrent in-flight requests
   quantization:

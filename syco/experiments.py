@@ -8,9 +8,9 @@ import yaml
 
 from syco import paths
 from syco.data import load_answers, load_personas, load_prompts
-from syco.grid import build_cells, cells_from_answers
+from syco.grid import build_cells
 from syco.model_registry import ModelRegistry, ModelSpec
-from syco.prompts import HISTORY_MODES, ProbeSpec
+from syco.prompts import PROBE_KINDS, ProbeSpec
 
 EXPERIMENTS_DIR = paths.CONFIG_DIR / "experiments"
 
@@ -53,9 +53,7 @@ class ExperimentProfile:
     def probe_spec(self) -> ProbeSpec:
         return ProbeSpec(
             kind=self.probe.get("kind", "openended"),
-            history_mode=self.probe.get("history_mode", "native"),
             n_models=self.probe.get("n_models", 3),
-            output_contract_version=self.probe.get("output_contract_version", 2),
         )
 
     @property
@@ -98,10 +96,7 @@ class ExperimentProfile:
             "--model", spec.alias,
             "--out", str(self.output_for(spec)),
             "--probe", self.probe_spec.kind,
-            "--history-mode", self.probe_spec.history_mode,
             "--n-models", str(self.probe_spec.n_models),
-            "--output-contract-version",
-            str(self.probe_spec.output_contract_version),
             "--system", str(self.probe.get("system") or ""),
             "--n-reps", str(self.design.get("n_reps", 1)),
             "--seed", str(self.design.get("seed", 1000)),
@@ -119,10 +114,6 @@ class ExperimentProfile:
                 args.extend(str(value) for value in values)
         if not self.design.get("include_control", True):
             args.append("--no-control")
-        if self.design.get("match_existing"):
-            args.extend(("--match-existing", str(_resolve_path(
-                self.design["match_existing"], paths.DATA_DIR
-            ))))
         if self.probe.get("thinking", False):
             args.append("--thinking")
         generation = self.probe.get("generation") or {}
@@ -139,10 +130,6 @@ class ExperimentProfile:
         personas, diagnostics = load_personas()
         prompts = load_prompts()
         restrict = None
-        match = self.design.get("match_existing")
-        if match:
-            answers = load_answers(_resolve_path(match, paths.DATA_DIR))
-            restrict = cells_from_answers(answers, self.design.get("persona_types"))
         cells = build_cells(
             personas,
             prompts,
@@ -187,13 +174,9 @@ def load_profile(name_or_path: str = "default") -> ExperimentProfile:
     execution = dict(doc.get("execution") or {})
     output = dict(doc.get("output") or {})
 
-    if probe.get("kind", "openended") not in {"openended", "plain"}:
+    if probe.get("kind", "openended") not in set(PROBE_KINDS):
         raise ValueError("profile probe.kind must be openended or plain")
-    if probe.get("history_mode", "native") not in HISTORY_MODES:
-        raise ValueError(f"profile history_mode must be one of {HISTORY_MODES}")
     _positive("probe.n_models", probe.get("n_models", 3))
-    if probe.get("output_contract_version", 2) not in {1, 2}:
-        raise ValueError("profile probe.output_contract_version must be 1 or 2")
     _positive("design.n_personas", design.get("n_personas"), allow_none=True)
     _positive("design.n_prompts", design.get("n_prompts"), allow_none=True)
     _positive("design.n_reps", design.get("n_reps", 1))

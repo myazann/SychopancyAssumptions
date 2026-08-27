@@ -4,45 +4,28 @@ import pandas as pd
 
 from scripts.summarize_assumptions import confidence, top_labels
 from syco.data import NO_PERSONA, Persona, Prompt
-from syco.grid import build_cells, cells_from_answers
+from syco.grid import build_cells
 
 
 def _persona(kind, person):
     return Persona(person, kind, (), False, 0)
 
 
-def test_match_existing_uses_full_design_coordinates():
+def test_restrict_cells_limits_to_full_design_coordinates():
+    """restrict_cells is keyed on all four coordinates, so restricting one
+    (facet, person, framing, dilemma) never silently admits another framing."""
     personas = [_persona("age", "p1"), _persona("gender", "p1")]
     prompts = [
         Prompt("q1", "original_post", "original"),
         Prompt("q1", "flipped_story", "flipped"),
     ]
-    answers = pd.DataFrame([
-        {
-            "persona_type": "age",
-            "persona_id": "p1",
-            "prompt_type": "original_post",
-            "prompt_id": "q1",
-        },
-        {
-            "persona_type": NO_PERSONA,
-            "persona_id": NO_PERSONA,
-            "prompt_type": "flipped_story",
-            "prompt_id": "q1",
-        },
-    ])
+    keep = {("age", "p1", "original_post", "q1")}
+    cells = build_cells(personas, prompts, include_no_persona=False,
+                        restrict_cells=keep)
+    got = {(c.persona.persona_type, c.persona.persona_id,
+            c.prompt.prompt_type, c.prompt.prompt_id) for c in cells}
+    assert got == keep
 
-    coordinates = cells_from_answers(answers)
-    cells = build_cells(
-        personas,
-        prompts,
-        prompt_types=["original_post", "flipped_story"],
-        restrict_cells=coordinates,
-    )
-    assert [cell.key_parts[:4] for cell in cells] == [
-        ("age", "p1", "original_post", "q1"),
-        (NO_PERSONA, NO_PERSONA, "flipped_story", "q1"),
-    ]
 
 
 def test_partial_grid_interleaves_source_order_facets_and_control():
@@ -72,8 +55,7 @@ def _summary_rows(model, control_label, facet_label):
         for rank, probability in enumerate((0.6, 0.3, 0.1)):
             rows.append({
                 "run_id": f"run-{model}",
-                "probe": "openended3v2/native",
-                "history_mode": "native",
+                "probe": "openended3",
                 "persona_type": persona_type,
                 "persona_id": persona_id,
                 "prompt_type": "original_post",

@@ -117,15 +117,18 @@ def _to_float(value) -> Optional[float]:
     return num if 0.0 <= num <= 1.0 else None
 
 
-def _find_json_object(text: str) -> Optional[str]:
-    """The smallest balanced {...} containing a known list key, ignoring braces inside
+#: Anchor keys for each probe family. The open-ended probe emits a
+#: `mental_models` *list*; the structured probes emit a `mental_model` *object*.
+#: One character apart, so they get separate patterns rather than one loose one.
+_OPEN_ENDED_KEY = r'''["']\s*(?:mental[_ ]?models|mentalModels|models)\s*["']'''
+_STRUCTURED_KEY = r'''["']\s*(?:mental[_ ]?model|mentalModel|beliefs|support[_ ]?seeking)\s*["']'''
+
+
+def _find_json_object(text: str, key_pattern: str = _OPEN_ENDED_KEY) -> Optional[str]:
+    """The smallest balanced {...} containing a known key, ignoring braces inside
     strings. Brace matching rather than a regex, because descriptions contain
     both braces and quotes."""
-    key = re.search(
-        r'''["']\s*(?:mental[_ ]?models|mentalModels|models)\s*["']''',
-        text,
-        re.IGNORECASE,
-    )
+    key = re.search(key_pattern, text, re.IGNORECASE)
     if key is None:
         return None
     anchor = key.start()
@@ -290,7 +293,7 @@ def normalized_probabilities(models: list) -> list:
 # trusted. `rep` is in here rather than behind --full on purpose -- drop it and
 # a multi-draw run silently looks like duplicate rows.
 LEAN_COLUMNS = (
-    "run_id", "probe", "history_mode", "persona_type", "persona_id",
+    "run_id", "probe", "persona_type", "persona_id",
     "prompt_type", "prompt_id", "rep",
     "rank", "assumption", "description", "probability", "probability_norm",
     "parse_status", "has_response",
@@ -315,7 +318,6 @@ def to_records(row: dict, parsed: ParsedProbe, full: bool = False) -> list:
         "prompt_id": row.get("prompt_id"),
         "rep": row.get("rep"),
         "probe": row.get("probe"),
-        "history_mode": row.get("history_mode"),
         "persona_turns": row.get("persona_turns"),
         "persona_recovered": row.get("persona_recovered"),
         "parse_status": parsed.status,
@@ -340,3 +342,162 @@ def to_records(row: dict, parsed: ParsedProbe, full: bool = False) -> list:
     if full:
         return rows
     return [{k: r[k] for k in LEAN_COLUMNS} for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# structured probes: fixed dimensions scored 0-1
+# ---------------------------------------------------------------------------
+@dataclass
+class Belief:
+    """One scored dimension from a structured probe."""
+    dimension: str
+    score: Optional[float]
+    explanation: str
+
+
+@dataclass
+class ParsedStructured:
+    status: str = FAILED
+    beliefs: list = field(default_factory=list)
+    response: str = ""
+    has_response: bool = False
+    notes: str = ""
+
+    @property
+    def n_dimensions(self) -> int:
+        return len(self.beliefs)
+
+
+def parse_structured(raw: str, kind: str) -> ParsedStructured:
+    """Pull `mental_model.<container>.<dimension>.{score, explanation}` out.
+
+    Unlike the open-ended probe there is no `sums to 1` invariant to check --
+    `supporttypes` states outright that its dimensions are independent and do
+    NOT need to sum to 1, so nothing here normalizes them. Missing dimensions
+    are emitted with a null score rather than dropped, so a cell always has one
+    row per dimension the prompt asked for and a gap is visible as a null.
+    """
+    from syco.prompts import STRUCTURED_CONTAINER, STRUCTURED_DIMENSIONS
+
+    if kind not in STRUCTURED_DIMENSIONS:
+        raise ValueError(f"{kind!r} is not a structured probe")
+    wanted = STRUCTURED_DIMENSIONS[kind]
+    container = STRUCTURED_CONTAINER[kind]
+
+    if not raw or not raw.strip():
+        return ParsedStructured(status=FAILED, notes="empty completion")
+
+    head, response, has_response = _split_response(raw)
+    result = ParsedStructured(
+        response=response,
+        has_response=has_response and bool(response.strip()),
+    )
+
+    notes = []
+    payload = None
+    for source, note in ((head, ""), (raw, "block after RESPONSE")):
+        block = _find_json_object(source, _STRUCTURED_KEY)
+        if block is None:
+            fenced = _FENCE_RE.search(source)
+            block = fenced.group(1).strip() if fenced else None
+        if block is None:
+            continue
+        for candidate, repair in ((block, ""),
+                                  (_TRAILING_COMMA_RE.sub(r"\1", block), "trailing comma")):
+            try:
+                payload = json.loads(candidate)
+            except Exception:
+                continue
+            if repair:
+                notes.append(repair)
+            break
+        if payload is not None:
+            if note:
+                notes.append(note)
+            break
+
+    if payload is None:
+        result.status = FAILED
+        result.notes = "; ".join(notes + ["no JSON object found"])
+        return result
+
+    # The prompt nests under mental_model -> container, but a model that
+    # flattened one level is still readable; take the first dict that holds the
+    # dimensions rather than failing the cell over nesting.
+    scope = payload
+    if isinstance(scope, dict) and "mental_model" in scope:
+        scope = scope["mental_model"]
+    if isinstance(scope, dict) and container in scope:
+        scope = scope[container]
+    elif isinstance(scope, dict) and not any(d in scope for d in wanted):
+        for value in scope.values():
+            if isinstance(value, dict) and any(d in value for d in wanted):
+                scope = value
+                notes.append("dimensions found under an unexpected key")
+                break
+
+    if not isinstance(scope, dict):
+        result.status = FAILED
+        result.notes = "; ".join(notes + ["no dimension object found"])
+        return result
+
+    found = 0
+    for dimension in wanted:
+        entry = scope.get(dimension)
+        if isinstance(entry, dict):
+            score = _to_float(entry.get("score"))
+            explanation = str(entry.get("explanation") or "").strip()
+        elif entry is None:
+            score, explanation = None, ""
+        else:
+            # A model that emitted a bare number instead of {score, explanation}.
+            score, explanation = _to_float(entry), ""
+            if score is not None:
+                notes.append(f"{dimension}: bare score")
+        if score is not None:
+            found += 1
+        result.beliefs.append(Belief(dimension, score, explanation))
+
+    missing = [b.dimension for b in result.beliefs if b.score is None]
+    if missing:
+        notes.append(f"missing score(s): {', '.join(missing)}")
+    out_of_range = [b.dimension for b in result.beliefs
+                    if b.score is not None and not 0.0 <= b.score <= 1.0]
+    if out_of_range:
+        notes.append(f"score(s) outside 0-1: {', '.join(out_of_range)}")
+
+    if found == 0:
+        result.status = FAILED
+    elif missing or out_of_range:
+        result.status = SALVAGED
+    elif notes:
+        result.status = REPAIRED
+    else:
+        result.status = CLEAN
+    result.notes = "; ".join(notes)
+    return result
+
+
+def to_structured_records(row: dict, parsed: ParsedStructured) -> list:
+    """One tidy record per scored dimension, with the cell's design columns."""
+    record = {
+        "cell_key": row.get("cell_key"),
+        "run_id": row.get("run_id"),
+        "persona_type": row.get("persona_type"),
+        "persona_id": row.get("persona_id"),
+        "prompt_type": row.get("prompt_type"),
+        "prompt_id": row.get("prompt_id"),
+        "rep": row.get("rep"),
+        "probe": row.get("probe"),
+        "persona_turns": row.get("persona_turns"),
+        "persona_recovered": row.get("persona_recovered"),
+        "parse_status": parsed.status,
+        "n_dimensions": parsed.n_dimensions,
+        "has_response": parsed.has_response,
+        "response_chars": len(parsed.response),
+        "parse_notes": parsed.notes,
+    }
+    if not parsed.beliefs:
+        return [dict(record, dimension=None, score=None, explanation=None)]
+    return [dict(record, dimension=b.dimension, score=b.score,
+                 explanation=b.explanation) for b in parsed.beliefs]

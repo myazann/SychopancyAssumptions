@@ -34,8 +34,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pandas as pd
 
-from syco.parse import parse_completion, to_records
+from syco.parse import (parse_completion, parse_structured, to_records,
+                        to_structured_records)
 from syco.store import canonical_rows, read_rows
+from syco.prompts import STRUCTURED_DIMENSIONS
 
 
 def parse_args(argv=None):
@@ -61,6 +63,75 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
+
+def _parse_structured_file(args, rows, kind, attempt_counts) -> int:
+    """Parse a structured probe (`4dims`, `supporttypes`) into one row per
+    scored dimension. Kept separate from the open-ended path because the two
+    have different schemas and different invariants -- the structured
+    dimensions are independent and are deliberately not normalized."""
+    records, cell_records = [], []
+    status_counts, by_facet = Counter(), {}
+    error_count = 0
+
+    for row in rows:
+        if row.get("error"):
+            error_count += 1
+        parsed = parse_structured(row.get("raw", ""), kind)
+        records.extend(to_structured_records(row, parsed))
+        status_counts[parsed.status] += 1
+        by_facet.setdefault(row.get("persona_type"), Counter())[parsed.status] += 1
+        cell = {k: row.get(k) for k in (
+            "cell_key", "run_id", "persona_type", "persona_id", "prompt_type",
+            "prompt_id", "rep", "probe", "persona_turns", "persona_recovered",
+            "model_ref", "quantization", "temperature", "prompt_digest",
+            "error", "timestamp",
+        )}
+        cell["attempt_count"] = attempt_counts.get(row.get("cell_key"), 1)
+        cell.update(parse_status=parsed.status, n_dimensions=parsed.n_dimensions,
+                    has_response=parsed.has_response,
+                    response_chars=len(parsed.response),
+                    raw_chars=len(row.get("raw", "")), parse_notes=parsed.notes)
+        if args.keep_response:
+            cell["response"] = parsed.response
+        cell_records.append(cell)
+
+    beliefs = pd.DataFrame(records)
+    cells = pd.DataFrame(cell_records)
+    default_prefix = args.input[:-6] if args.input.endswith(".jsonl") else args.input
+    prefix = args.out_prefix or default_prefix
+    writers = {
+        "parquet": lambda df, path: df.to_parquet(path, index=False),
+        "csv": lambda df, path: df.to_csv(path, index=False),
+        "json": lambda df, path: df.to_json(path, orient="records", indent=2,
+                                            force_ascii=False),
+        "jsonl": lambda df, path: df.to_json(path, orient="records", lines=True,
+                                             force_ascii=False),
+    }
+    write = writers[args.format]
+    out = f"{prefix}_structured.{args.format}"
+    write(beliefs, out)
+
+    n_cells = len(cells)
+    total = sum(status_counts.values()) or 1
+    print(f"{n_cells} cell(s) -> {len(beliefs)} scored dimension(s)  [probe: {kind}]")
+    print("parse status: " + ", ".join(
+        f"{name}={count} ({count / total:.1%})"
+        for name, count in status_counts.most_common()))
+    if error_count:
+        print(f"generation errors: {error_count}")
+    scored = beliefs.dropna(subset=["score"]) if "score" in beliefs else beliefs
+    if len(scored):
+        print("\nmean score per dimension")
+        print(scored.groupby("dimension")["score"].agg(["count", "mean", "std"])
+              .to_string(float_format=lambda v: f"{v:.3f}"))
+    print(f"\nwrote {out}")
+    if args.cells or args.keep_response:
+        cells_out = f"{prefix}_cells.{args.format}"
+        write(cells, cells_out)
+        print(f"      {cells_out}")
+    return 0
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
     attempts = read_rows(args.input)
@@ -69,6 +140,16 @@ def main(argv=None) -> int:
         return 1
     rows, retry_diagnostics = canonical_rows(attempts)
     attempt_counts = Counter(row.get("cell_key") for row in attempts)
+
+    # Which probe produced this file decides which table it parses into. The
+    # probe label is stamped on every row by the runner, so this is read from
+    # the data rather than passed in and possibly mismatched.
+    labels = {str(r.get("probe") or "") for r in rows}
+    structured_kinds = {k for k in STRUCTURED_DIMENSIONS
+                        if any(label == k for label in labels)}
+    if structured_kinds and len(structured_kinds) == len(labels):
+        return _parse_structured_file(args, rows, sorted(structured_kinds)[0],
+                                      attempt_counts)
 
     assumption_records, cell_records = [], []
     status_counts, by_facet = Counter(), {}
@@ -85,7 +166,7 @@ def main(argv=None) -> int:
 
         cell = {k: row.get(k) for k in (
             "cell_key", "run_id", "persona_type", "persona_id", "prompt_type", "prompt_id",
-            "rep", "probe", "history_mode", "persona_turns",
+            "rep", "probe", "persona_turns",
             "persona_recovered", "model_ref", "quantization",
             "temperature", "thinking_applied", "thinking_standardized",
             "prompt_digest", "error", "timestamp",

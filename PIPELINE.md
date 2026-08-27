@@ -39,17 +39,21 @@ runs processed a whole alphabetically sorted facet at once, so a live snapshot
 misleadingly contained only `persona_type=assumptions`; partial runs now cover
 every facet.
 
-## Two ways to send the conversation
+## How the conversation is sent
 
-- `--history-mode native` (default) — the persona transcript goes as **real chat
-  turns** and the probe rides on the final user message. This is how
-  `files/*_long_results.pkl` was collected, so an assumption row and its
-  existing `model_answer` share a prompt prefix and compare cell for cell.
-- `--history-mode inline` — the paper's own shape: the transcript flattened into
-  a `Conversation so far: """..."""` block, model addressed as a third party
-  observing "User A". A robustness check on the same cells. Expect it to differ:
-  a model reading a transcript is in a different position from one that has been
-  in the conversation.
+There is one way, because the paper has one way. The persona transcript is
+flattened to `User: ... / AI: ...` text and placed in a `Conversation so far:
+"""..."""` block inside a single user message; the dilemma follows under
+`User A now says:`; the model is addressed as a third party observing "User A".
+
+`syco/prompts.py` is a verbatim copy of the vendored `build_prompt_openended`,
+and `tests/test_prompts.py` diffs it against that source character for
+character. If the two ever drift, the suite fails.
+
+An earlier version of this repo also had a `--history-mode native` that sent the
+transcript as real chat turns and addressed the model as the user's
+interlocutor. That was never the paper's instrument. It has been removed, and
+data collected under it cannot be pooled with data collected under the probe.
 
 ## Run it
 
@@ -79,12 +83,11 @@ python -m syco run --model Gemma3-12B --dry-run \
 
 # the real thing, on cells the existing answers table already covers
 python -m syco run --model Gemma3-12B \
-    --match-existing files/gemma-3-12b-it_long_results.pkl \
     --n-personas 25 --n-prompts 20
 
-python -m syco parse     results/Gemma3-12B/openended3v2-native.jsonl
-python -m syco summarize results/Gemma3-12B/openended3v2-native_assumptions.parquet
-python -m syco topics    results/Gemma3-12B/openended3v2-native_assumptions.parquet
+python -m syco parse     results/Gemma3-12B/openended3.jsonl
+python -m syco summarize results/Gemma3-12B/openended3_assumptions.parquet
+python -m syco topics    results/Gemma3-12B/openended3_assumptions.parquet
 ```
 
 `requirements.txt` lists its runtime packages explicitly. See README.md for
@@ -103,14 +106,7 @@ batch in flight and flushes. `--no-resume` now requires a new/empty output;
 
 Without `--out`, all model-specific artifacts use
 `results/<model>/<probe>.*`: raw JSONL, manifest, run log, and derived tables
-stay together. Contract v2 is the default for new work. The explicit
-`--output-contract-version 1` compatibility mode preserves the original prompt
-and label so an interrupted v1 pilot can resume without mixing instruments.
-
-`--match-existing` is the flag that matters for comparing against work already
-done: it restricts the grid to full `(persona_type, persona_id, prompt_type,
-prompt_id)` coordinates, so every assumption row lands beside an answer from
-the same model on the exact same cell.
+stay together.
 
 ## Adding a model
 
@@ -127,14 +123,12 @@ a time, since its KV cache is shared state.
 
 ## Output
 
-The prompt now uses one explicit, versioned output contract across all model
-families: the completion must begin with one bare JSON object, contain exactly
-the requested number of mental models, and put the actual answer after a literal
-`RESPONSE:` line. The version appears in the probe label, for example
-`openended3v2/native`, so runs made with the earlier pilot wording cannot be
-pooled silently.
+The probe asks, in the paper's own words, for the top three mental models as
+JSON with probabilities summing to 1, then the reply under a `RESPONSE:`
+heading. The probe label on every row is the paper's prompt-type name plus the
+model count, for example `openended3`.
 
-Compliance is not the only protection. The parser also handles preambles,
+Models do not always comply with a JSON contract they were merely asked for. The parser also handles preambles,
 Markdown fences/headings, trailing commas, string/percentage probabilities,
 common alternate JSON keys, truncated JSON entries, and numbered Markdown
 field lists. Every repair is retained in `parse_status`/`parse_notes`; an output

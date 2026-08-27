@@ -7,8 +7,10 @@ from syco.orchestrate import GPU, run_all
 class FakeProfile:
     name = "test"
     execution = {"poll_seconds": 1, "wait_report_seconds": 1}
+    model_selection = "enabled"
 
-    def __init__(self, root, specs):
+    def __init__(self, root, specs, model_selection="enabled"):
+        self.model_selection = model_selection
         self.path = root / "test.yaml"
         self.results_dir = root / "results"
         self.logs_dir = root / "logs"
@@ -64,3 +66,33 @@ def test_run_all_schedules_largest_first_and_forwards_limit(tmp_path, monkeypatc
     assert all(command[-2:] == ["--limit", "7"] for command, _ in launches)
     assert {gpu for _, gpu in launches[:2]} == {"0", "1"}
     assert all(Path(profile.log_for(spec)).is_file() for spec in specs)
+
+
+def test_explicit_model_list_is_run_in_the_order_written(tmp_path, monkeypatch):
+    """A `models:` list in the profile is a running order, not just a filter --
+    largest-first is only the fallback for `models: enabled`."""
+    specs = [_spec("small", 4_000), _spec("large", 9_000), _spec("medium", 6_000)]
+    profile = FakeProfile(tmp_path, specs,
+                          model_selection=("small", "large", "medium"))
+    launches = []
+
+    class Process:
+        def __init__(self, command, **kwargs):
+            launches.append(command[command.index("--model") + 1])
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr("syco.orchestrate.load_registry", lambda: object())
+    monkeypatch.setattr(
+        "syco.orchestrate.query_gpus",
+        lambda: [GPU(index=0, total_mib=24_000, free_mib=24_000)],
+    )
+    monkeypatch.setattr("syco.orchestrate.subprocess.Popen", Process)
+    monkeypatch.setattr("syco.orchestrate.time.sleep", lambda _: None)
+
+    run_all(profile)
+    assert launches == ["small", "large", "medium"]

@@ -8,7 +8,7 @@ from syco.parse import (
     parse_completion,
     to_records,
 )
-from syco.prompts import ProbeSpec, native_probe
+from syco.prompts import ProbeSpec
 from syco.store import AssumptionRecord, canonical_rows
 
 BLOCK = (
@@ -65,19 +65,11 @@ A useful reply"""
     assert "expected 3 assumptions, found 2" in parsed.notes
 
 
-def test_prompt_has_one_versioned_cross_model_output_contract():
-    prompt = native_probe("A dilemma", n_models=3)
-    assert "first character of your output must be `{`" in prompt
-    assert "Do not use a Markdown code fence" in prompt
-    assert "line containing exactly `RESPONSE:`" in prompt
-    assert ProbeSpec().label() == "openended3v2/native"
-
-
-def test_legacy_contract_keeps_original_prompt_and_label_for_resume():
-    prompt = native_probe("A dilemma", n_models=3, output_contract_version=1)
-    assert "Before you reply, infer your top three possible mental models" in prompt
-    assert "first character of your output" not in prompt
-    assert ProbeSpec(output_contract_version=1).label() == "openended3/native"
+def test_probe_label_names_the_papers_prompt_type():
+    """No invented framing in the label -- see tests/test_prompts.py for the
+    verbatim diff against the vendored reference implementation."""
+    assert ProbeSpec().label() == "openended3"
+    assert ProbeSpec().family == "open-ended"
 
 
 def test_redundant_model_columns_are_not_in_raw_row_schema():

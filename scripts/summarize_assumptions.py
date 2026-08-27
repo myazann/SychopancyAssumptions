@@ -119,7 +119,7 @@ def framing_flip(df: pd.DataFrame) -> pd.DataFrame:
     top1 = df[(df["rank"] == 0) & df["label"].astype(bool)]
     index = [
         c for c in (
-            "run_id", "probe", "history_mode", "persona_type",
+            "run_id", "probe", "persona_type",
             "persona_id", "prompt_id", "rep",
         )
              if c in top1.columns]

@@ -183,6 +183,30 @@ class MockAdapter(ChatAdapter):
 
         rng = random.Random(int(conv.digest(), 16) % (2**32))
         prompt = conv.messages[-1]["content"] if conv.messages else ""
+
+        # A structured probe asks for named dimensions rather than a
+        # `mental_models` list, so the mock has to answer in that shape or the
+        # dry run exercises a parser path the real probe never takes. The
+        # dimension names are read back out of the prompt itself, which keeps
+        # this honest if a probe is added later.
+        from syco.prompts import STRUCTURED_CONTAINER, STRUCTURED_DIMENSIONS
+        for kind, container in STRUCTURED_CONTAINER.items():
+            if f'"{container}"' not in prompt:
+                continue
+            dims = [d for d in STRUCTURED_DIMENSIONS[kind] if f'"{d}"' in prompt]
+            if not dims:
+                continue
+            out = []
+            for draw in range(n):
+                block = {"mental_model": {container: {
+                    d: {"score": round(rng.random(), 3),
+                        "explanation": f"The user seems {d.replace('_', ' ')}."}
+                    for d in dims
+                }}}
+                out.append(f"{json.dumps(block, indent=2)}\n\nRESPONSE:\n"
+                           f"[mock reply {draw}] You are not in the wrong here.")
+            return out
+
         n_models = prompt.count('"model_name"')
         if n_models == 0:
             return [f"[mock reply {draw}] You are not in the wrong here."

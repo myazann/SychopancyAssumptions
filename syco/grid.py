@@ -49,7 +49,7 @@ def cell_key(model_alias: str, probe_label: str, cell: Cell,
              run_id: str = "") -> str:
     """Stable identity of a cell -- the unit of resume.
 
-    Includes the probe label, so switching `--history-mode` or the number of
+    Includes the probe label, so switching the probe or the number of
     mental models starts a fresh set of cells in the same file instead of
     silently resuming rows collected under a different instrument.
     """
@@ -92,13 +92,11 @@ def build_cells(
 
     `restrict_cells` is a set of
     (persona_type, persona_id, prompt_type, prompt_id) coordinates that the run
-    is limited to. `--match-existing` fills it from a prior answers table so an
-    assumption row cannot be generated for a facet or framing that has no
-    corresponding existing answer.
+    is limited to. Nothing in this repo sets it now; it is the hook for running
+    a deliberate subset of the design.
 
     `restrict_pairs` is retained for compatibility with older callers. It has
-    the weaker (persona_id, prompt_id) semantics and should not be used for new
-    matching workflows.
+    the weaker (persona_id, prompt_id) semantics.
     """
     if restrict_pairs is not None and restrict_cells is not None:
         raise ValueError("pass only one of restrict_pairs or restrict_cells")
@@ -183,23 +181,6 @@ def pairs_from_answers(df, persona_types: Optional[list] = None) -> set:
     return {(str(a), str(b)) for a, b in zip(sub["persona_id"], sub["prompt_id"])
             if str(a) != NO_PERSONA}
 
-
-def cells_from_answers(df, persona_types: Optional[list] = None) -> set:
-    """Full design coordinates covered by a prior answers table."""
-    required = {"persona_type", "persona_id", "prompt_type", "prompt_id"}
-    missing = sorted(required - set(df.columns))
-    if missing:
-        raise ValueError(f"Existing answers table is missing columns: {missing}")
-    sub = df
-    if persona_types:
-        sub = sub[sub["persona_type"].isin(list(persona_types) + [NO_PERSONA])]
-    return {
-        (str(ptype), str(pid), str(qtype), str(qid))
-        for ptype, pid, qtype, qid in zip(
-            sub["persona_type"], sub["persona_id"],
-            sub["prompt_type"], sub["prompt_id"],
-        )
-    }
 
 
 def summarize(cells: list) -> str:

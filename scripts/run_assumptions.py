@@ -24,14 +24,8 @@ Collect assumptions for cells the existing answers table already covers, so
 every assumption row sits beside an answer from the same model:
 
     python -m syco run --model Gemma3-12B \
-        --match-existing files/gemma-3-12b-it_long_results.pkl \
         --n-personas 25 --n-prompts 20 \
         --out results/gemma3-12b_openended.jsonl
-
-The paper's own framing, as a robustness check on the same cells:
-
-    python -m syco run --model Gemma3-12B --history-mode inline \
-        --out results/gemma3-12b_openended_inline.jsonl
 
 Runs resume by default: re-running the same command with the same --out picks
 up where it stopped, and rows that recorded an error are retried.
@@ -133,7 +127,6 @@ def make_record(
         prompt_id=cell.prompt.prompt_id,
         rep=cell.rep,
         probe=spec_probe.label(),
-        history_mode=spec_probe.history_mode,
         n_assumptions_asked=spec_probe.n_models,
         persona_turns=cell.persona.n_turns,
         persona_recovered=cell.persona.recovered,
@@ -179,25 +172,13 @@ def parse_args(argv=None):
                    help="results JSONL (default: results/<alias>/<probe>.jsonl)")
 
     g = p.add_argument_group("instrument")
-    g.add_argument("--probe", choices=("openended", "plain"), default="openended",
-                   help="openended = assumptions then reply; plain = reply only "
-                        "(the no-probe control, matching the existing answers table)")
-    g.add_argument("--history-mode", choices=probe_prompts.HISTORY_MODES,
-                   default=probe_prompts.NATIVE,
-                   help="native: persona as real chat turns (default, matches how "
-                        "the answers table was collected). inline: the paper's "
-                        "transcript-in-one-message framing")
+    g.add_argument("--probe", choices=probe_prompts.PROBE_KINDS, default="openended",
+                   help="which of the paper's prompt types to administer. Only "
+                        "`openended` is ported; the rest refuse rather than "
+                        "approximate (see syco/prompts.py)")
     g.add_argument("--n-models", type=positive_int,
                    default=probe_prompts.DEFAULT_N_MODELS,
                    help="how many mental models to ask for (paper: 3)")
-    g.add_argument(
-        "--output-contract-version",
-        type=int,
-        choices=(1, probe_prompts.OUTPUT_CONTRACT_VERSION),
-        default=probe_prompts.OUTPUT_CONTRACT_VERSION,
-        help="response contract version (default: 2; use 1 only to resume a "
-             "compatible pilot run)",
-    )
     g.add_argument("--system", default="",
                    help="system prompt, applied to every cell (default: none)")
 
@@ -215,10 +196,6 @@ def parse_args(argv=None):
                    help="draws per cell (>1 measures within-cell variance)")
     g.add_argument("--no-control", action="store_true",
                    help="drop the persona-free control cells")
-    g.add_argument("--match-existing", default=None,
-                   help="restrict to exact persona/facet/framing/dilemma cells "
-                        "in a prior answers table, e.g. "
-                        "files/gemma-3-12b-it_long_results.pkl")
     g.add_argument("--seed", type=int, default=1000,
                    help="sampling seed; the same seed gives the same subset")
 
@@ -307,9 +284,7 @@ def main(argv=None) -> int:
 
     spec_probe = probe_prompts.ProbeSpec(
         kind=args.probe,
-        history_mode=args.history_mode,
         n_models=args.n_models,
-        output_contract_version=args.output_contract_version,
     )
 
     out = args.out or str(
@@ -330,12 +305,6 @@ def main(argv=None) -> int:
     personas, diag = load_personas()
     dilemmas = load_prompts()
     restrict = None
-    if args.match_existing:
-        answers = load_answers(args.match_existing)
-        restrict = grid.cells_from_answers(answers, args.persona_types)
-        print(f"matching {len(restrict)} full design cell(s) from "
-              f"{args.match_existing}")
-
     cells = grid.build_cells(
         personas, dilemmas,
         persona_types=args.persona_types,

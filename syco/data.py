@@ -215,9 +215,10 @@ def load_prompts(path=None) -> list:
 def load_answers(path) -> pd.DataFrame:
     """A prior answers table (e.g. `gemma-3-12b-it_long_results.pkl`).
 
-    Its persona/prompt columns are the design cells that model was already run
-    on; `--match-existing` reuses them so every assumption row has an answer to
-    sit beside. NaN persona columns are the persona-free control.
+    Kept as a loader for inspecting prior tables. Nothing in the pipeline uses
+    it: the `--match-existing` flag it used to serve made a claim about how
+    those tables were collected that did not hold, and has been removed.
+    NaN persona columns are the persona-free control.
     """
     df = pd.read_pickle(path)
     df = df.copy()

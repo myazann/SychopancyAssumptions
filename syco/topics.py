@@ -121,7 +121,7 @@ def ngrams(text, n: int = 1, drop_stopwords: bool = False) -> list[str]:
     return list(seen)
 
 
-def assumption_text(df: pd.DataFrame, field: str = "assumption") -> pd.Series:
+def assumption_text(df: pd.DataFrame, field: str = "description") -> pd.Series:
     """The text column to analyze. `both` keeps the label and its description
     as separate phrases, so no bigram straddles the join."""
     if field not in TEXT_FIELDS:
@@ -165,7 +165,7 @@ def _shares(long: pd.DataFrame, group: list[str],
     return counts
 
 
-def ngram_frequencies(df: pd.DataFrame, *, field: str = "assumption",
+def ngram_frequencies(df: pd.DataFrame, *, field: str = "description",
                       levels=(1, 2), stopword_mode: str = "unigrams",
                       by=("persona_type",), top: int = 25,
                       min_count: int = 2) -> pd.DataFrame:
@@ -257,7 +257,7 @@ def _ratio(numerator, denominator):
     return np.asarray(numerator, dtype=float) / safe
 
 
-def corpus_profile(df: pd.DataFrame, field: str = "assumption") -> pd.DataFrame:
+def corpus_profile(df: pd.DataFrame, field: str = "description") -> pd.DataFrame:
     """Size of the corpus each frequency table is computed over.
 
     `mean_tokens` follows `field`; `distinct_labels` always counts the short
@@ -403,7 +403,7 @@ def _limit_thread_pools(threads: int) -> None:
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 
-def fit_topics(df: pd.DataFrame, *, field: str = "assumption",
+def fit_topics(df: pd.DataFrame, *, field: str = "description",
                embedding_model: str = DEFAULT_EMBEDDING_MODEL,
                min_topic_size: int = 10, nr_topics=None, seed: int = 1000,
                reduce_outliers: bool = False, top_words: int = 10,

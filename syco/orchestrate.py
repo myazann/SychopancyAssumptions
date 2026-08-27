@@ -47,9 +47,7 @@ def _expected_manifest(profile: ExperimentProfile, registry, spec) -> dict:
     effective_spec = configured_spec(args, registry)
     probe = ProbeSpec(
         kind=args.probe,
-        history_mode=args.history_mode,
         n_models=args.n_models,
-        output_contract_version=args.output_contract_version,
     )
     return build_manifest(args=args, spec=effective_spec, probe=probe)
 
@@ -150,7 +148,14 @@ def run_all(
             f"No GPU can fit the configured VRAM requirement for: {', '.join(impossible)}"
         )
 
-    queue = sorted(specs, key=lambda spec: spec.estimated_vram_mib, reverse=True)
+    # An explicit `models:` list in the profile is an expressed running order,
+    # so it is honoured as written. `models: enabled` expresses no order, so the
+    # queue falls back to largest-first, which packs the GPUs better: a big
+    # model that has to wait for a whole card blocks less if it goes first.
+    if profile.model_selection == "enabled":
+        queue = sorted(specs, key=lambda spec: spec.estimated_vram_mib, reverse=True)
+    else:
+        queue = list(specs)
     running: dict[int, Running] = {}
     results: dict[str, int] = {}
     poll = int(profile.execution.get("poll_seconds", 2))
