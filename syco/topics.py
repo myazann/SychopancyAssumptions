@@ -307,6 +307,7 @@ class TopicResult:
     info: pd.DataFrame              # one row per topic: size, share, top words
     outlier_share: float            # share of assumptions BERTopic left at -1
     params: dict = field(default_factory=dict)
+    embeddings: object = None       # the encoder output, kept for reuse
 
     @property
     def n_topics(self) -> int:
@@ -407,7 +408,8 @@ def fit_topics(df: pd.DataFrame, *, field: str = "description",
                embedding_model: str = DEFAULT_EMBEDDING_MODEL,
                min_topic_size: int = 10, nr_topics=None, seed: int = 1000,
                reduce_outliers: bool = False, top_words: int = 10,
-               device: str = "auto", threads: int = 4) -> TopicResult:
+               device: str = "auto", threads: int = 4,
+               embeddings=None, keep_embeddings: bool = False) -> TopicResult:
     """Sentence-transformer embeddings -> BERTopic, over the whole input.
 
     `seed` is threaded into UMAP's `random_state`. Without it BERTopic is not
@@ -471,7 +473,16 @@ def fit_topics(df: pd.DataFrame, *, field: str = "description",
             f"could not load sentence-transformer {embedding_model!r}: "
             f"{type(err).__name__}: {err}"
         ) from err
-    embeddings = encoder.encode(docs, show_progress_bar=False)
+    # `embeddings` lets a caller that already encoded this exact corpus -- for a
+    # distance metric, say -- hand the vectors over instead of paying for a
+    # second pass. Length is checked because a mismatched array would silently
+    # cluster the wrong documents.
+    if embeddings is None:
+        embeddings = encoder.encode(docs, show_progress_bar=False)
+    elif len(embeddings) != len(docs):
+        raise ValueError(
+            f"{len(embeddings)} precomputed embeddings for {len(docs)} documents"
+        )
 
     # UMAP's default n_neighbors=15 exceeds the corpus on small runs.
     neighbors = max(2, min(15, len(docs) - 1))
@@ -509,6 +520,7 @@ def fit_topics(df: pd.DataFrame, *, field: str = "description",
         assignments=assignments,
         info=info,
         outlier_share=outlier_share,
+        embeddings=embeddings if keep_embeddings else None,
         params={
             "embedding_model": embedding_model,
             "field": field,

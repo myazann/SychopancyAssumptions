@@ -33,6 +33,11 @@ anthropic>=0.125,<1
 bertopic>=0.16,<0.18
 sentence-transformers>=3,<6
 
+# Licensed LIWC-22 CLI integration. pyliwc 1.5 imports fastcore at runtime but
+# currently declares it only in its development extra, so list it explicitly.
+pyliwc>=1.5,<2
+fastcore>=1.7,<2
+
 # Tests and linting
 pytest>=8,<10
 ruff>=0.11,<1

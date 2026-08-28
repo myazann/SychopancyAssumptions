@@ -28,6 +28,9 @@ Commands:
                          (stages: binary, join)
   text STAGE ...         analyze persona or response text descriptively
                          (stages: features, words)
+  analyze [options]      the three analyses of the open-ended grid: persona
+                         facet and framing, demographics, and sycophancy ->
+                         a directory of tables, figures, and findings
   pipeline               run-all, merge, parse-all, summarize-all, topics-all
 
 Profile commands default to config/experiments/default.yaml. Override with:
@@ -165,6 +168,9 @@ def main(argv: list[str] | None = None) -> int:
         if command == "text":
             from scripts.analyze_text import main as text_main
             return text_main(rest)
+        if command == "analyze":
+            from scripts.analyze_openended import main as analyze_main
+            return analyze_main(rest)
         if command == "plan":
             from syco.orchestrate import plan
             parser = _profile_parser("Plan every model in a profile")

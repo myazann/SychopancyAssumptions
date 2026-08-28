@@ -500,6 +500,7 @@ def doctor(profile: ExperimentProfile) -> int:
         "pyarrow": "default parser output",
         "huggingface_hub": "GGUF resolution",
         "transformers": "chat templates",
+        "pyliwc": "LIWC text analysis",
     }
     if any(spec.backend == LLAMACPP_BACKEND for spec in specs):
         checks["llama_cpp"] = "enabled GGUF models"

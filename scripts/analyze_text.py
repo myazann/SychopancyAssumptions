@@ -7,6 +7,11 @@ Examples:
     python -m syco text features files/gemma-3-12b-it_long_results.pkl \
         --text-column model_answer --method stance --out response_features.parquet
 
+    # LIWC features computed through pyliwc and an activated LIWC installation
+    python -m syco text features files/gemma-3-12b-it_long_results.pkl \
+        --text-column model_answer --method liwc --liwc-cli LIWC-22-cli \
+        --out response_liwc.parquet
+
     # Words in persona self-descriptions associated with extracted assumptions
     python -m syco text words files/base_data_persona.gz \
         results/Gemma3-12B/openended3_assumptions.parquet \
@@ -88,8 +93,10 @@ def _features(args) -> int:
     table, column = _prepare(table, column, args.persona_role)
     methods = args.method or ["stance"]
     analyzed = text.attach_text_features(
-        table, column, methods=methods, liwc_path=args.liwc,
-        keys=args.key, batch_size=args.batch_size, device=args.device,
+        table, column, methods=methods, batch_size=args.batch_size,
+        device=args.device, liwc_cli_path=args.liwc_cli,
+        liwc_dict=args.liwc_dictionary, liwc_threads=args.liwc_threads,
+        liwc_verbose=args.liwc_verbose,
     )
     feature_columns = [column for column in analyzed.columns
                        if column not in table.columns]
@@ -138,10 +145,16 @@ def main(argv=None) -> int:
                         default="user", help="turns to retain when persona_text is a transcript")
     parser.add_argument("--method", action="append", choices=text.TEXT_METHODS,
                         help="features: repeatable analysis method (default: stance)")
-    parser.add_argument("--liwc", default=None,
-                        help="features: keyed precomputed LIWC table for --method liwc")
+    parser.add_argument("--liwc-cli", default="LIWC-22-cli",
+                        help="features: LIWC CLI executable used by pyliwc")
+    parser.add_argument("--liwc-dictionary", default="LIWC22",
+                        help="features: built-in dictionary name or .dicx path")
+    parser.add_argument("--liwc-threads", type=int, default=None,
+                        help="features: LIWC workers (default: CPU count minus one)")
+    parser.add_argument("--liwc-verbose", action="store_true",
+                        help="features: show LIWC CLI progress")
     parser.add_argument("--key", action="append", default=None,
-                        help="repeatable text/feature or text/assumption join key")
+                        help="words: repeatable text/assumption join key")
     parser.add_argument("--field", default="label",
                         help="words: assumption or topic column (default: label)")
     parser.add_argument("--min-count", type=int, default=5,
@@ -161,8 +174,8 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if args.stage == "features" and args.assumptions:
         parser.error("features does not take an assumptions table")
-    if args.method and "liwc" in args.method and not args.liwc:
-        parser.error("--method liwc needs --liwc PATH")
+    if args.liwc_threads is not None and args.liwc_threads <= 0:
+        parser.error("--liwc-threads must be positive")
     return {"features": _features, "words": _words}[args.stage](args)
 
 

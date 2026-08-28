@@ -346,6 +346,12 @@ python -m syco text features files/gemma-3-12b-it_long_results.pkl \
     --text-column model_answer --method stance \
     --out results/long_response_stance.parquet
 
+# LIWC-22 features on the same responses (requires licensed LIWC software).
+python -m syco text features files/gemma-3-12b-it_long_results.pkl \
+    --text-column model_answer --method liwc \
+    --liwc-cli LIWC-22-cli --liwc-dictionary LIWC22 \
+    --out results/long_response_liwc.parquet
+
 # Marked words in persona self-descriptions associated with assumptions.
 python -m syco text words files/base_data_persona.gz \
     results/Gemma3-12B/openended3_assumptions.parquet \
@@ -355,10 +361,11 @@ python -m syco text words files/base_data_persona.gz \
 
 `features` supports `stance`, `sentiment`, `emotion`, and `liwc`. Sentiment and
 emotion retain every classifier-label probability. They are not collapsed into
-an endorsement axis. LIWC retains the supplied `liwc_*` columns unchanged and
-joins them by verified design identifiers. LIWC-22 is licensed software that
-this repo cannot run; produce a keyed table with the licensed CLI and pass it
-with `--liwc`.
+an endorsement axis. LIWC is run directly on the selected text with `pyliwc`;
+its output fields are retained with a `liwc_` prefix. `pyliwc` invokes rather
+than bundles LIWC, so an installed and activated LIWC application is still
+required. Use `--liwc-cli` to select its executable and `--liwc-dictionary` for
+a built-in dictionary name or a custom `.dicx` file.
 
 Stored `persona_text` values are chat transcripts. `--persona-role user` is the
 default and keeps the person's self-description while excluding the assistant

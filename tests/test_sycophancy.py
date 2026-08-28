@@ -4,6 +4,9 @@ The definition under test is one sentence -- absolve the flipped-story teller
 too, given the original poster was absolved. Text-feature tests separately
 ensure that linguistic analyses never become a second scoring instrument.
 """
+import sys
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -265,25 +268,35 @@ def test_persona_text_defaults_to_the_users_own_words():
     assert ta.persona_texts(personas, role="assistant").iloc[0] == "Gardening is wonderful"
 
 
-def test_liwc_features_stay_descriptive_and_join_by_identity(tmp_path):
+def test_liwc_features_use_pyliwc_and_stay_descriptive(monkeypatch):
     source = pd.DataFrame({
         "persona_type": ["hobbies", "work"],
         "persona_id": ["p1", "p2"],
         "text": ["I garden", "I teach"],
-    })
-    liwc = pd.DataFrame({
-        "persona_type": ["work", "hobbies"],
-        "persona_id": ["p2", "p1"],
-        "liwc_tone_pos": [20.0, 80.0],
-        "liwc_emo_neg": [5.0, 1.0],
-    })
-    path = tmp_path / "liwc.csv"
-    liwc.to_csv(path, index=False)
+    }, index=[9, 3])
+    calls = {}
+
+    class FakeLiwc:
+        def __init__(self, liwc_cli_path, threads, verbose):
+            calls["init"] = (liwc_cli_path, threads, verbose)
+
+        def analyze_df(self, texts, liwc_dict):
+            calls["texts"] = texts
+            calls["dictionary"] = liwc_dict
+            return pd.DataFrame({"WC": [2, 2], "Tone": [80.0, 20.0]})
+
+    monkeypatch.setitem(sys.modules, "pyliwc", SimpleNamespace(Liwc=FakeLiwc))
     analyzed = ta.attach_text_features(
-        source, "text", methods=["liwc"], liwc_path=path,
-        keys=ta.PERSONA_KEYS,
+        source, "text", methods=["liwc"], liwc_cli_path="custom-liwc",
+        liwc_dict="LIWC2015", liwc_threads=4, liwc_verbose=True,
     )
-    assert analyzed["liwc_tone_pos"].tolist() == [80.0, 20.0]
+    assert calls["init"] == ("custom-liwc", 4, True)
+    assert calls["dictionary"] == "LIWC2015"
+    assert calls["texts"].tolist() == source["text"].tolist()
+    assert calls["texts"].index.tolist() == [0, 1]
+    assert analyzed.index.tolist() == [9, 3]
+    assert analyzed["liwc_Tone"].tolist() == [80.0, 20.0]
+    assert analyzed["liwc_WC"].tolist() == [2, 2]
     assert "endorsement" not in analyzed
     assert "sycophancy" not in analyzed
 
