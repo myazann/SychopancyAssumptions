@@ -1,0 +1,48 @@
+schema_version: "1.0"
+name: structured-4dims-extension-40x40
+
+# Model order must remain identical to the base array so Slurm's `aftercorr`
+# dependency can release each extension task when its matching base task ends.
+models:
+  - Qwen3.6-27B
+  - Gemma3-12B
+  - Llama-3.1-8B
+  - Gemma3-27B
+  - Qwen3.6-35B-A3B
+
+probe:
+  # Validation seeking, user rightness, user information advantage, objectivity.
+  kind: 4dims
+  system: ""
+  thinking: false
+
+design:
+  # The target. The runner verifies this file, uses its exact 40 people and 40
+  # dilemmas, and emits only the cells the shards under `extend_from` still
+  # lack -- so waves compose: a 60x60 profile names a 60x60 lock here and lists
+  # both earlier shards below.
+  lock: config/designs/structured-40x40.json
+  persona_types: null
+  prompt_types: [original_post, flipped_story]
+  # With a lock these are only an assertion: "this wave should add 20 new
+  # people and 20 new dilemmas". The lock decides which ones.
+  n_personas: 20
+  n_prompts: 20
+  n_reps: 1
+  include_control: true
+  seed: 1000
+  # Every shard already collected, oldest first. A third wave lists two.
+  extend_from:
+    - results/{model}/{probe}.jsonl
+
+execution:
+  poll_seconds: 2
+  wait_report_seconds: 60
+  wait_timeout_seconds: null
+
+output:
+  # Separate immutable acquisition shards: active base files are never opened
+  # for writing by an extension job.
+  results_dir: results/extensions/structured-40x40
+  merge_dir: results/extensions/structured-40x40/merged
+  collection_dir: results/collections/structured-40x40

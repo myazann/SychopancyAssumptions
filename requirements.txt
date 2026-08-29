@@ -33,6 +33,15 @@ anthropic>=0.125,<1
 bertopic>=0.16,<0.18
 sentence-transformers>=3,<6
 
+# `python -m syco analyze`. matplotlib renders the figures and statsmodels
+# supplies the cluster-robust regression the sycophancy section reports beside
+# its permutation tests; neither is needed by any other command. scipy arrives
+# with the topic stack anyway, but the analysis imports it directly for the
+# chi-square, Spearman and exact binomial tests, so it is declared.
+matplotlib>=3.8,<4
+scipy>=1.11,<2
+statsmodels>=0.14,<1
+
 # Licensed LIWC-22 CLI integration. pyliwc 1.5 imports fastcore at runtime but
 # currently declares it only in its development extra, so list it explicitly.
 pyliwc>=1.5,<2

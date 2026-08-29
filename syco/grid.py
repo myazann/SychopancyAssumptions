@@ -19,6 +19,7 @@ Sampling independently per condition would confound the contrast with whichever
 personas and dilemmas happened to be drawn, and no amount of downstream
 analysis recovers from that.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -33,20 +34,26 @@ from syco.data import CONTROL_PERSONA, FLIPPED, NO_PERSONA, ORIGINAL, Persona, P
 class Cell:
     persona: Persona
     prompt: Prompt
-    rep: int = 0                 # repeat index, for multi-draw cells
+    rep: int = 0  # repeat index, for multi-draw cells
 
     @property
     def key_parts(self) -> tuple:
-        return (self.persona.persona_type, self.persona.persona_id,
-                self.prompt.prompt_type, self.prompt.prompt_id, self.rep)
+        return (
+            self.persona.persona_type,
+            self.persona.persona_id,
+            self.prompt.prompt_type,
+            self.prompt.prompt_id,
+            self.rep,
+        )
 
     def describe(self) -> str:
-        return (f"{self.persona.persona_type}/{self.persona.persona_id[:8]} "
-                f"x {self.prompt.prompt_type}/{self.prompt.prompt_id} #{self.rep}")
+        return (
+            f"{self.persona.persona_type}/{self.persona.persona_id[:8]} "
+            f"x {self.prompt.prompt_type}/{self.prompt.prompt_id} #{self.rep}"
+        )
 
 
-def cell_key(model_alias: str, probe_label: str, cell: Cell,
-             run_id: str = "") -> str:
+def cell_key(model_alias: str, probe_label: str, cell: Cell, run_id: str = "") -> str:
     """Stable identity of a cell -- the unit of resume.
 
     Includes the probe label, so switching the probe or the number of
@@ -59,7 +66,7 @@ def cell_key(model_alias: str, probe_label: str, cell: Cell,
     return "|".join(str(p) for p in parts)
 
 
-def _stable_sample(items: list, n: Optional[int], seed: int, tag: str) -> list:
+def stable_sample(items: list, n: Optional[int], seed: int, tag: str) -> list:
     """A deterministic subset, drawn the same way on every re-run.
 
     Seeded off `tag` as well as `seed`, so the persona draw and the prompt draw
@@ -73,6 +80,44 @@ def _stable_sample(items: list, n: Optional[int], seed: int, tag: str) -> list:
     return rng.sample(list(items), n)
 
 
+def eligible_design_ids(
+    personas: list,
+    prompts: list,
+    *,
+    persona_types: Optional[list] = None,
+    prompt_types: Optional[list] = None,
+) -> tuple[list[str], list[str]]:
+    """Return people and dilemmas eligible for a fully paired design.
+
+    People must occur in every requested persona facet and dilemmas must occur
+    in every requested framing.  Extension runs use this public helper to draw
+    additional IDs from the eligible pool *after* removing the IDs already in
+    their base run.
+    """
+    by_type: dict[str, set[str]] = {}
+    for persona in personas:
+        by_type.setdefault(persona.persona_type, set()).add(persona.persona_id)
+    types = [t for t in (persona_types or list(by_type)) if t in by_type]
+    if persona_types:
+        missing = [t for t in persona_types if t not in by_type]
+        if missing:
+            raise ValueError(
+                f"Unknown persona_type(s): {missing}. Known: {sorted(by_type)}"
+            )
+    people = set.intersection(*(by_type[t] for t in types)) if types else set()
+
+    by_prompt: dict[str, set[str]] = {}
+    for prompt in prompts:
+        by_prompt.setdefault(prompt.prompt_id, set()).add(prompt.prompt_type)
+    framings = list(prompt_types or (ORIGINAL, FLIPPED))
+    dilemmas = [
+        prompt_id
+        for prompt_id, available in by_prompt.items()
+        if all(framing in available for framing in framings)
+    ]
+    return sorted(people), sorted(dilemmas)
+
+
 def build_cells(
     personas: list,
     prompts: list,
@@ -84,6 +129,8 @@ def build_cells(
     include_no_persona: bool = True,
     n_reps: int = 1,
     seed: int = 1000,
+    persona_ids: Optional[list[str]] = None,
+    prompt_ids: Optional[list[str]] = None,
     restrict_pairs: Optional[set] = None,
     restrict_cells: Optional[set] = None,
 ) -> list:
@@ -111,8 +158,9 @@ def build_cells(
     if persona_types:
         missing = [t for t in persona_types if t not in by_type]
         if missing:
-            raise ValueError(f"Unknown persona_type(s): {missing}. "
-                             f"Known: {sorted(by_type)}")
+            raise ValueError(
+                f"Unknown persona_type(s): {missing}. Known: {sorted(by_type)}"
+            )
 
     # Only people present in EVERY selected facet are eligible, so the
     # trait contrast never compares different sets of people.
@@ -121,8 +169,19 @@ def build_cells(
         complete &= {pid for _, pid, _, _ in restrict_cells if pid != NO_PERSONA}
     elif restrict_pairs is not None:
         complete &= {pid for pid, _ in restrict_pairs}
-    persona_ids = sorted(complete)
-    persona_ids = _stable_sample(persona_ids, n_persona_ids, seed, "persona")
+    available_persona_ids = sorted(complete)
+    if persona_ids is not None:
+        if n_persona_ids is not None:
+            raise ValueError("persona_ids and n_persona_ids are mutually exclusive")
+        requested = list(dict.fromkeys(str(value) for value in persona_ids))
+        missing = sorted(set(requested) - set(available_persona_ids))
+        if missing:
+            raise ValueError(f"Ineligible persona_id(s): {missing}")
+        selected_persona_ids = requested
+    else:
+        selected_persona_ids = stable_sample(
+            available_persona_ids, n_persona_ids, seed, "persona"
+        )
 
     # Same for dilemmas: a prompt_id is eligible only if both framings exist,
     # so original/flipped enter and leave the sample together.
@@ -131,13 +190,30 @@ def build_cells(
         by_prompt.setdefault(q.prompt_id, {})[q.prompt_type] = q
 
     want_framings = [t for t in (prompt_types or (ORIGINAL, FLIPPED))]
-    eligible = [pid for pid, framings in by_prompt.items()
-                if all(f in framings for f in want_framings)]
+    eligible = [
+        pid
+        for pid, framings in by_prompt.items()
+        if all(f in framings for f in want_framings)
+    ]
     if restrict_cells is not None:
-        eligible = [pid for pid in eligible if pid in {q for _, _, _, q in restrict_cells}]
+        eligible = [
+            pid for pid in eligible if pid in {q for _, _, _, q in restrict_cells}
+        ]
     elif restrict_pairs is not None:
         eligible = [pid for pid in eligible if pid in {q for _, q in restrict_pairs}]
-    prompt_ids = _stable_sample(sorted(eligible), n_prompt_ids, seed, "prompt")
+    available_prompt_ids = sorted(eligible)
+    if prompt_ids is not None:
+        if n_prompt_ids is not None:
+            raise ValueError("prompt_ids and n_prompt_ids are mutually exclusive")
+        requested = list(dict.fromkeys(str(value) for value in prompt_ids))
+        missing = sorted(set(requested) - set(available_prompt_ids))
+        if missing:
+            raise ValueError(f"Ineligible prompt_id(s): {missing}")
+        selected_prompt_ids = requested
+    else:
+        selected_prompt_ids = stable_sample(
+            available_prompt_ids, n_prompt_ids, seed, "prompt"
+        )
 
     cells = []
     # Interleave facets within each person/dilemma instead of writing one giant
@@ -147,11 +223,10 @@ def build_cells(
     if include_no_persona:
         persona_groups.append([CONTROL_PERSONA])
     persona_groups.extend(
-        [by_type[t][pid] for t in types]
-        for pid in persona_ids
+        [by_type[t][pid] for t in types] for pid in selected_persona_ids
     )
 
-    for prompt_id in prompt_ids:
+    for prompt_id in selected_prompt_ids:
         for framing in want_framings:
             for personas_for_cell in persona_groups:
                 for persona in personas_for_cell:
@@ -178,9 +253,11 @@ def pairs_from_answers(df, persona_types: Optional[list] = None) -> set:
     sub = df
     if persona_types:
         sub = sub[sub["persona_type"].isin(list(persona_types) + [NO_PERSONA])]
-    return {(str(a), str(b)) for a, b in zip(sub["persona_id"], sub["prompt_id"])
-            if str(a) != NO_PERSONA}
-
+    return {
+        (str(a), str(b))
+        for a, b in zip(sub["persona_id"], sub["prompt_id"])
+        if str(a) != NO_PERSONA
+    }
 
 
 def summarize(cells: list) -> str:

@@ -1,0 +1,112 @@
+{
+  "design_id": "71ece5950ff3be55bfffa8de80dec2feef4a7ea8655876856d4b474d3d8b6d52",
+  "identity": {
+    "coordinates_sha256": "7a286ab2aadb4e5ad892f2a2a15965aa503756b2683f73a9448ea5b9cb4a6f20",
+    "data": {
+      "personas_sha256": "95e6a8fa8896c7747d8f765852c6b4fce38de776bf0b3d00d875323c70763c7e",
+      "prompts_sha256": "2929b0a0e450da35dffbc6fb6dff3556a217f4916217212fcde53a160abadcb6"
+    },
+    "expected_coordinates": 10040,
+    "factors": {
+      "control": {
+        "persona_id": "none",
+        "persona_type": "none"
+      },
+      "include_control": true,
+      "n_reps": 1,
+      "persona_types": [
+        "hobbies",
+        "motivation",
+        "recognition",
+        "life_story",
+        "crossroads",
+        "family",
+        "influence",
+        "setback",
+        "politics",
+        "assumptions"
+      ],
+      "prompt_types": [
+        "original_post",
+        "flipped_story"
+      ]
+    },
+    "instruments": [
+      {
+        "dimensions": [],
+        "expected_cells": 10040,
+        "family": "open-ended",
+        "n_models": 3,
+        "probe": "openended",
+        "system": "",
+        "thinking": false
+      }
+    ],
+    "name": "openended-25x20",
+    "selection": {
+      "persona_ids": [
+        "d39adc6684584d7eb7d678e40899c746",
+        "dded192341374648916ced22b95e76a8",
+        "118202d86e694456813add4a335412bd",
+        "1e0e681080f149139d3c654a0577826c",
+        "1208aa8c41bb4838b45324b37b364d7d",
+        "ba7d4d28ec9b44659f2b1cb1c4a1c25f",
+        "cbef4f983a1747c08f6042a1c322e661",
+        "5c9c7d8511064f3f9854d7946845633a",
+        "89f274986836494f94e9532f113817f6",
+        "ed3825c55c4a48d382be53c49ddeac46",
+        "0df713dc98374e25b502975312422359",
+        "b9e7d7371f5344d984350178dd870b1a",
+        "760156709af740cdb96f0c3b4f2a4e43",
+        "79769c789290487186ef0d8fce809ff7",
+        "5005df5d8ac342c187414f631eabe2f0",
+        "42e5a4e93de7454a832e6e53e9891994",
+        "34da8230743948048386761f7b31a1a7",
+        "2fc7206b5ebc40588199a2ad1dd20402",
+        "685d01d301054c95be3f074c5619de92",
+        "583aa9ad42f14f878573aba01423e608",
+        "f86a8bcabbed4ddba7fb1e5e8478dfdf",
+        "a7cd6f19d82b4d34800c069e33f397e3",
+        "2f95fb4878454f2db8a77e81a8917241",
+        "1de87af23c29482d812415728c201b09",
+        "06b0bd2f2d3d40ffa0da2a9e5d7aaaab"
+      ],
+      "prompt_ids": [
+        "dtag51",
+        "e5m77u",
+        "elejtg",
+        "9ztw6t",
+        "bwsgcv",
+        "dbg03j",
+        "b38ju6",
+        "eooa9k",
+        "emze6y",
+        "b2a1md",
+        "c9swu0",
+        "ckdfhy",
+        "a6hmqy",
+        "8iiwtz",
+        "ee91fd",
+        "dc92vv",
+        "drdykq",
+        "cpngpe",
+        "cusibn",
+        "chr65e"
+      ]
+    }
+  },
+  "kind": "syco-design-lock",
+  "provenance": {
+    "frozen_from": [
+      "results/Gemma3-12B/openended3.jsonl"
+    ],
+    "selection_seed": 1000,
+    "source_runs": [
+      {
+        "probe": "openended",
+        "run_id": "91e86800781e987ab0c5"
+      }
+    ]
+  },
+  "schema_version": 1
+}

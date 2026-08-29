@@ -89,6 +89,13 @@ STOPWORD_MODES = {
     "none": (),
 }
 
+#: Words this instrument's own prompt puts into nearly every answer. The probe
+#: addresses the person as "User A", so `user` is in 99% of the assumptions and
+#: `a`/`a's` follow it around; counting them describes the prompt, not the
+#: model. Dropped by default in `syco analyze`, kept by `syco topics`, and
+#: overridable in both.
+PROMPT_ECHO = frozenset({"user", "a", "a's", "users"})
+
 
 # ---------------------------------------------------------------------------
 # tokenizing
@@ -105,17 +112,26 @@ def segments(text) -> list[list[str]]:
     return out
 
 
-def ngrams(text, n: int = 1, drop_stopwords: bool = False) -> list[str]:
+def ngrams(text, n: int = 1, drop_stopwords: bool = False,
+           extra: frozenset = frozenset()) -> list[str]:
     """The distinct n-grams of one piece of text, in order of first appearance.
 
     *Distinct*: every share this module reports is a share of assumptions or of
     responses that contain the term at all, never a token count, so a label
     that says "validation" twice must not count twice.
+
+    `extra` drops corpus-specific tokens the way `drop_stopwords` drops
+    function words, and independently of it. It exists because a prompt puts
+    words into every answer it gets: this instrument addresses the person as
+    "User A", so `user` appears in 99% of the assumptions and half the top
+    bigrams are `user <something>`. That is the prompt echoing, not the model
+    choosing, and leaving it in buries whatever the model did choose.
     """
+    drop = set(STOPWORDS) | set(extra) if drop_stopwords else set(extra)
     seen: dict[str, None] = {}
     for tokens in segments(text):
-        if drop_stopwords:
-            tokens = [t for t in tokens if t not in STOPWORDS]
+        if drop:
+            tokens = [t for t in tokens if t not in drop]
         for i in range(len(tokens) - n + 1):
             seen.setdefault(" ".join(tokens[i:i + n]), None)
     return list(seen)
@@ -139,10 +155,12 @@ def assumption_text(df: pd.DataFrame, field: str = "description") -> pd.Series:
 # n-gram frequency
 # ---------------------------------------------------------------------------
 def _term_frame(df: pd.DataFrame, field: str, n: int,
-                drop_stopwords: bool) -> pd.DataFrame:
+                drop_stopwords: bool,
+                extra: frozenset = frozenset()) -> pd.DataFrame:
     """Long frame: one row per (assumption row, distinct term)."""
     text = assumption_text(df, field)
-    terms = text.map(lambda t: ngrams(t, n=n, drop_stopwords=drop_stopwords))
+    terms = text.map(lambda t: ngrams(t, n=n, drop_stopwords=drop_stopwords,
+                                      extra=extra))
     base = pd.DataFrame({
         "_row": df.index,
         "_cell": cell_id(df).to_numpy(),
@@ -168,7 +186,8 @@ def _shares(long: pd.DataFrame, group: list[str],
 def ngram_frequencies(df: pd.DataFrame, *, field: str = "description",
                       levels=(1, 2), stopword_mode: str = "unigrams",
                       by=("persona_type",), top: int = 25,
-                      min_count: int = 2) -> pd.DataFrame:
+                      min_count: int = 2,
+                      extra_stopwords: frozenset = frozenset()) -> pd.DataFrame:
     """Term frequency per experiment, overall and within each grouping.
 
     One tidy table. `scope` is the grouping dimension a row belongs to --
@@ -190,7 +209,8 @@ def ngram_frequencies(df: pd.DataFrame, *, field: str = "description",
 
     frames = []
     for n in levels:
-        long = _term_frame(df, field, n, drop_stopwords=n in stopword_levels)
+        long = _term_frame(df, field, n, drop_stopwords=n in stopword_levels,
+                           extra=frozenset(extra_stopwords))
         if long.empty:
             continue
         cells = pd.DataFrame({"_cell": cell_id(df).to_numpy()}, index=df.index)

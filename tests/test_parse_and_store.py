@@ -207,3 +207,68 @@ def test_latest_success_wins_over_failed_retries():
         "retried_cells": 2,
         "extra_attempts": 3,
     }
+
+
+# --- malformed-JSON recovery ------------------------------------------------
+# Both cases below are taken from real completions in results/: Llama-3.1-8B
+# drops the outermost closing brace on ~a quarter of its 4dims cells, and every
+# model occasionally quotes the user inside an explanation without escaping.
+
+def _unclosed(payload=FOUR_DIMS):
+    """The model's own JSON, one closing brace short."""
+    block = json.dumps({"mental_model": {"beliefs": payload}}, indent=2)
+    assert block.rstrip().endswith("}")
+    return f"{block.rstrip()[:-1]}\nRESPONSE:\nA useful reply"
+
+
+def test_unclosed_structured_object_is_repaired_not_failed():
+    parsed = parse_structured(_unclosed(), "4dims")
+    assert parsed.status == REPAIRED
+    assert parsed.n_scored == 4
+    assert [belief.score for belief in parsed.beliefs] == [0.8, 0.6, 0.7, 0.4]
+    assert parsed.response == "A useful reply"
+    assert "unclosed JSON object" in parsed.notes
+
+
+def test_unclosed_open_ended_object_keeps_its_probabilities():
+    block = json.dumps({"mental_models": [
+        {"model_name": "validation", "description": "seeking support",
+         "probability": 0.6},
+        {"model_name": "advice", "description": "wants options",
+         "probability": 0.4},
+    ]}, indent=2)
+    parsed = parse_completion(f"{block.rstrip()[:-1]}\nRESPONSE:\nreply", 2)
+    assert parsed.status == REPAIRED
+    assert parsed.n_assumptions == 2
+    assert parsed.prob_sum == 1.0
+
+
+def test_unescaped_quote_in_one_explanation_keeps_the_other_dimensions():
+    payload = dict(FOUR_DIMS)
+    payload["objectivity_seeking"] = {
+        "score": 0.4,
+        "explanation": 'They ask ("Was I wrong?") and want a verdict.',
+    }
+    # json.dumps would escape those quotes; the model does not.
+    block = json.dumps({"mental_model": {"beliefs": payload}})
+    raw = block.replace('\\"', '"') + "\nRESPONSE:\nA useful reply"
+    parsed = parse_structured(raw, "4dims")
+    assert parsed.status == SALVAGED
+    assert "regex salvage" in parsed.notes
+    assert parsed.n_scored == 4
+    assert [belief.score for belief in parsed.beliefs] == [0.8, 0.6, 0.7, 0.4]
+    objectivity = parsed.beliefs[-1]
+    assert objectivity.explanation.startswith("They ask")
+
+
+def test_recovery_never_upgrades_a_well_formed_block():
+    """The repair tiers sit behind the balanced scan, so a clean cell is
+    untouched and an off-scale score is still refused rather than rescaled."""
+    assert parse_structured(_structured_raw(), "4dims").status == CLEAN
+
+    off_scale = {name: {"score": 8.5, "explanation": "on a 0-10 scale"}
+                 for name in FOUR_DIMS}
+    for raw in (_structured_raw(off_scale), _unclosed(off_scale)):
+        parsed = parse_structured(raw, "4dims")
+        assert parsed.status == "failed"
+        assert parsed.n_scored == 0

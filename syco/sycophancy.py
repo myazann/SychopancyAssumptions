@@ -266,8 +266,12 @@ def attach_to_assumptions(assumptions: pd.DataFrame, scores: pd.DataFrame,
     """
     if level not in ("auto", "cell", "persona"):
         raise ValueError(f"unknown join level {level!r}")
-    columns = ["sycophancy", "sycophancy_soft"]
-    columns = [column for column in columns if column in scores.columns]
+    # Any `sycophancy*` column the score table carries comes along, so a
+    # caller can add a reading of the same construct on another scale -- the
+    # log-odds rather than the probability, say -- and rank on it without this
+    # function needing to know the name.
+    columns = [column for column in scores.columns
+               if column.startswith("sycophancy")]
     renamed = {column: f"{column}{suffix}" for column in columns}
 
     def _join(keys):

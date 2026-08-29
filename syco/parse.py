@@ -7,10 +7,17 @@ generations.
 Models do not honor the requested format exactly. In practice the failures are:
 a ```json fence around the block, prose before it, a trailing comma, a
 probability written as "0.4" or 40%, `RESPONSE` spelled as a markdown heading,
-alternate field names, a numbered Markdown field list, and truncation partway
-through the reply. Each is handled here, and each is also *reported* --
-`parse_status` distinguishes a clean parse from a salvaged one, because a
-finding that only holds on salvaged rows is a finding about the parser.
+alternate field names, a numbered Markdown field list, truncation partway
+through the reply, a block whose closing delimiters were never written, and an
+unescaped `"` inside one explanation. Each is handled here, and each is also
+*reported* -- `parse_status` distinguishes a clean parse from a salvaged one,
+because a finding that only holds on salvaged rows is a finding about the
+parser.
+
+What is deliberately NOT handled: a score outside 0-1. A model that answers the
+structured probe on a 0-10 scale has answered a different instrument, so those
+dimensions are recorded as null rather than divided by ten -- see
+`_to_structured_score`.
 """
 from __future__ import annotations
 
@@ -158,6 +165,61 @@ def _find_json_object(text: str, key_pattern: str = _OPEN_ENDED_KEY) -> Optional
     return None
 
 
+def _close_unbalanced_object(text: str,
+                             key_pattern: str = _OPEN_ENDED_KEY) -> Optional[str]:
+    """Re-close a block whose trailing delimiters the model never wrote.
+
+    Llama-3.1-8B ends `mental_model` one brace short on about a quarter of its
+    structured completions: every dimension is present and the reply follows
+    normally, but the outermost object is never closed, so the balanced scan in
+    `_find_json_object` walks off the end and reports nothing at all.
+
+    Truncate at the last delimiter the model did close and reopen nothing --
+    just emit the closers it still owed, innermost first. Brackets are tracked
+    alongside braces because the open-ended probe nests its entries in a list,
+    so a brace-only repair would drop the `]` and produce different invalid
+    JSON. Only reached after the balanced scan has already failed, so a
+    well-formed block never takes this path, and the result is reported as
+    REPAIRED rather than CLEAN.
+    """
+    key = re.search(key_pattern, text, re.IGNORECASE)
+    if key is None:
+        return None
+    start = text.rfind("{", 0, key.start())
+    if start < 0:
+        return None
+    closer = {"{": "}", "[": "]"}
+    stack: list = []
+    in_string, escape = False, False
+    last_close, owed = None, None
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch in closer:
+            stack.append(ch)
+        elif ch in ("}", "]"):
+            if not stack or closer[stack[-1]] != ch:
+                return None          # crossed delimiters: not a clean truncation
+            stack.pop()
+            last_close, owed = i, list(stack)
+    # An empty `owed` means the block closed itself and something else is wrong
+    # with it; only a genuinely unclosed block is repaired here.
+    if last_close is None or not owed:
+        return None
+    return text[start:last_close + 1] + "".join(
+        closer[ch] for ch in reversed(owed))
+
+
 def _entries_from_obj(obj) -> list:
     if isinstance(obj, dict):
         for key in ("mental_models", "mentalModels", "models"):
@@ -228,6 +290,12 @@ def parse_completion(raw: str, expected_n: Optional[int] = None) -> ParsedProbe:
         if block is None:
             fenced = _FENCE_RE.search(source)
             block = fenced.group(1).strip() if fenced else None
+        if block is None:
+            # Same dropped-closing-brace defect as the structured probes. It
+            # lands here as REPAIRED rather than falling through to the regex
+            # tier below, because re-closing recovers the model's own JSON --
+            # probabilities included -- instead of re-deriving it from text.
+            block = _close_unbalanced_object(source)
         if block is None:
             continue
 
@@ -400,6 +468,57 @@ def _to_structured_score(value) -> Optional[float]:
     return number if 0.0 <= number <= 1.0 else None
 
 
+#: `"<dimension>": { ... }` -- just the anchor; the body is read separately,
+#: because the entries that break `json.loads` are the ones whose explanation
+#: contains an unescaped `"` and so cannot be delimited by quote counting.
+_DIMENSION_ANCHOR = r"""["']\s*{0}\s*["']\s*:\s*\{{"""
+_SCORE_RE = re.compile(
+    r"""["']score["']\s*:\s*(?P<score>[0-9.eE+%\-]+|["'][^"']*["'])""",
+    re.IGNORECASE)
+# Non-greedy body anchored on the entry's closing brace rather than on a
+# balanced quote -- same trick as `_ENTRY_RE`, for the same reason.
+_EXPLANATION_RE = re.compile(
+    r"""["']explanation["']\s*:\s*["'](?P<explanation>.*?)["']\s*,?\s*\}""",
+    re.DOTALL | re.IGNORECASE)
+
+
+def _regex_beliefs(source: str, wanted: tuple) -> dict:
+    """Field-by-field extraction when the block will not parse as JSON.
+
+    The open-ended probe has had this tier since the start (`_regex_models`);
+    the structured probes did not, so a single unescaped quote inside one
+    explanation failed the whole cell and lost the other three or four
+    dimensions with it. Each dimension is read from its own slice, so one bad
+    explanation costs only its own entry.
+    """
+    found = {}
+    for dimension in wanted:
+        anchor = re.search(_DIMENSION_ANCHOR.format(re.escape(dimension)),
+                           source, re.IGNORECASE)
+        if anchor is None:
+            continue
+        # Bound the slice at the next dimension so a missing closing brace
+        # cannot let one entry swallow the following ones.
+        end = len(source)
+        for other in wanted:
+            if other == dimension:
+                continue
+            nxt = re.search(_DIMENSION_ANCHOR.format(re.escape(other)),
+                            source[anchor.end():], re.IGNORECASE)
+            if nxt is not None:
+                end = min(end, anchor.end() + nxt.start())
+        slice_ = source[anchor.end():end]
+        score = _SCORE_RE.search(slice_)
+        explanation = _EXPLANATION_RE.search(slice_)
+        if score is None and explanation is None:
+            continue
+        found[dimension] = (
+            _to_structured_score(score.group("score")) if score else None,
+            (explanation.group("explanation").strip() if explanation else ""),
+        )
+    return found
+
+
 def parse_structured(raw: str, kind: str) -> ParsedStructured:
     """Pull `mental_model.<container>.<dimension>.{score, explanation}` out.
 
@@ -439,6 +558,10 @@ def parse_structured(raw: str, kind: str) -> ParsedStructured:
             fenced = _FENCE_RE.search(source)
             block = fenced.group(1).strip() if fenced else None
         if block is None:
+            block = _close_unbalanced_object(source, _STRUCTURED_KEY)
+            if block is not None:
+                notes.append("unclosed JSON object")
+        if block is None:
             continue
         decorated = source.strip() != block.strip()
         for candidate, repair in ((block, ""),
@@ -458,6 +581,24 @@ def parse_structured(raw: str, kind: str) -> ParsedStructured:
             break
 
     if payload is None:
+        # Field-by-field, before giving up: an unescaped `"` in one explanation
+        # is not a reason to lose the other dimensions in the cell.
+        salvaged = _regex_beliefs(head, wanted) or _regex_beliefs(raw, wanted)
+        if any(score is not None for score, _ in salvaged.values()):
+            result.beliefs = [
+                Belief(dimension, *salvaged.get(dimension, (None, "")))
+                for dimension in wanted
+            ]
+            missing = [b.dimension for b in result.beliefs if b.score is None]
+            if missing:
+                notes.append(f"missing score(s): {', '.join(missing)}")
+            notes.append("regex salvage")
+            if not result.has_response:
+                notes.append("empty RESPONSE" if has_response
+                             else "no RESPONSE heading")
+            result.status = SALVAGED
+            result.notes = "; ".join(notes)
+            return result
         result.status = FAILED
         result.beliefs = [Belief(dimension, None, "") for dimension in wanted]
         result.notes = "; ".join(notes + ["no JSON object found"])

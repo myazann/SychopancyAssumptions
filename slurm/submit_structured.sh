@@ -20,6 +20,13 @@ cd "$REPO"
 PYTHON="$REPO/.venv/bin/python"
 PROFILES=(structured-4dims structured-supporttypes)
 
+# Profile expansion is metadata-only. Keep numpy/OpenBLAS from trying to create
+# one thread per visible login-node CPU before `sbatch` is called.
+export OPENBLAS_NUM_THREADS=1
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+
 for PROFILE_NAME in "${PROFILES[@]}"; do
     mapfile -t MODELS < <("$PYTHON" slurm/profile_args.py --models "$PROFILE_NAME")
     if (( ${#MODELS[@]} == 0 )); then

@@ -71,8 +71,8 @@ data collected under it cannot be pooled with data collected under the probe.
 ## Run it
 
 ```bash
-# Install first; see README.md for virtualenv and CUDA details.
-python -m pip install -r requirements.txt
+# Install first; see README.md for environment and CUDA details.
+CMAKE_ARGS="-DGGML_CUDA=on" uv sync --frozen
 python -m syco models                  # what's configured, and how each is served
 python -m syco doctor                  # dependencies, data, profile, and GPUs
 python -m syco smoke                   # offline end-to-end pipeline
@@ -124,15 +124,68 @@ python -m syco pipeline --profile structured-supporttypes
 For structured profiles, `pipeline` ends after the numeric summary; topic
 modeling is skipped because the dimensions are fixed rather than free text.
 
-`requirements.txt` lists its runtime packages explicitly. See README.md for
-virtual-environment setup, the CUDA-enabled `llama-cpp-python` build, developer
-requirements, and optional Transformers dependencies. `python -m syco doctor`
-verifies imports but cannot determine whether llama.cpp was compiled with CUDA.
+### Collecting a design in waves
+
+A run of this size is collected in pieces. Each **wave** is an immutable
+acquisition shard; `design.lock` names the target, and `design.extend_from`
+lists every shard already collected, oldest first. The runner unions their
+coordinates and emits only the difference, so waves compose: a 60 x 60 profile
+names a 60 x 60 lock and lists both earlier shards.
+
+Use `structured-4dims-extension-40x40` and
+`structured-supporttypes-extension-40x40` to add 20 unused personas and 20
+unused dilemmas to the existing 20 x 20 structured runs. Both profiles point
+at `config/designs/structured-40x40.json`; the runner verifies its digest and
+source-data hashes, then uses its exact IDs. Every prior shard must be settled
+— finished against its own declared cell count, or a complete paired grid over
+its own IDs — because planning against a shard still being written would put
+the same coordinates in two files at once. Every stored `prompt_digest` in
+those shards is rebuilt and compared, so a prompt change is caught per cell
+rather than inferred from a source hash. A design, model, instrument, data, or
+prompt mismatch stops before model loading.
+
+`python -m syco design freeze --run OUTPUT ...` locks the design a finished run
+already covers, which is how the chain starts from a run that predates any
+lock. `design extend` then picks the next target's disjoint IDs.
+
+A wave is the missing part of the full union, not a second diagonal block:
+
+| component | cells/model/probe |
+|---|---:|
+| existing 20 x 20 base | 8,040 |
+| extension shard | 24,040 |
+| combined 40 x 40 collection | 32,080 |
+
+Acquisition shards and base files remain immutable. `syco collect-extension`
+joins every wave, validates zero coordinate overlap, and checks the union
+against the lock's coordinate digest — an independent statement of the target,
+where comparing the rows only to themselves would miss a facet absent from
+every wave alike. It then atomically writes an analysis collection whose common
+run ID lets the existing parser and summaries treat all 32,080 cells as one
+deliberate experiment, while `source_run_id` and `source_cell_key` keep each
+row traceable to the wave that produced it.
+
+`pyproject.toml` declares the project environment and `uv.lock` fixes the exact
+resolution. See README.md for the CUDA-enabled `llama-cpp-python` build and the
+pip-compatible fallback. `python -m syco doctor` verifies imports but cannot
+determine whether llama.cpp was compiled with CUDA.
 
 Runs resume by default — re-run the same command with the same `--out`. Every
-JSONL has an adjacent `.manifest.json` carrying an immutable `run_id`; changing
-the model, data, code, prompt, design, decoding, or thinking setting requires a
-new output path instead of silently mixing experiments. Rows that recorded an
+JSONL has an adjacent `.manifest.json` carrying a `run_id` that digests what
+was administered: model, instrument, source data, the exact coordinates, and
+`acquisition_digest`, a hash of only the modules that decide which bytes reach
+the model. The rest of the repository is hashed separately as `repo_digest`,
+outside `identity`, so analysis work never disturbs a run in flight.
+
+An existing output keeps its recorded `run_id` — `cell_key` embeds it, so
+recomputing one would orphan every row already collected. The runner appends
+what changed to a `revisions` list and proves the old and new rows are the same
+observation against the data instead: every row present must be a cell the
+current configuration still administers, and their stored `prompt_digest`
+values must still rebuild identically. Changing the model, probe, system
+prompt, thinking setting, source data, or design is refused by name and needs a
+new output path. One output has one writer, held as an advisory lock for the
+life of the run. Rows that recorded an
 error are retried, and parsing keeps the latest successful attempt per cell.
 A truncated final line from a killed run is ignored. Ctrl-C once finishes the
 batch in flight and flushes. `--no-resume` now requires a new/empty output;
@@ -464,6 +517,152 @@ GGUF at temperature 0.7 under the paper's third-party probe, while the answer
 tables in `files/` were collected in bf16 with greedy decoding under a
 first-person prompt. Cells are matched on design coordinates, not on a shared
 forward pass, and serving differences are inside the join.
+
+## The three-question analysis
+
+`syco topics` and `syco sycophancy` each answer one question and print it.
+`syco analyze` answers the three the study is actually about, over one shared
+topic space, and writes the answers as files rather than printing them:
+
+```bash
+python -m syco analyze \
+    --model Llama-3.1-8B --model Qwen3.6-35B-A3B --model Gemma3-12B \
+    --out results/analysis
+```
+
+With no `--model` it takes every `results/*/<probe>_assumptions.parquet` it
+finds, and warns about any whose grid is less complete than the fullest one.
+Sections can be run separately with `--sections 1,2`. Expect roughly half an
+hour at the default 2,000 permutations; the embeddings and the fitted topic
+model are cached under `<out>/shared/cache`, so a re-run with different test
+settings skips both.
+
+The output is a directory: `KEY_FINDINGS.md` for what survived, `report.html`
+for the same thing as a self-contained page, a `README.md` per section, and one
+CSV per table. Every figure is written twice, light and dark, and has the CSV
+holding the same numbers beside it.
+
+### Why there are three different nulls
+
+The three questions have three different units of independence, and using one
+test for all of them would be wrong twice.
+
+* **Facet and framing are within-subject.** The same person appears under all
+  ten disclosed facets and the same dilemma is told from both sides, so the
+  null is not "these labels were drawn from the whole sample" but "inside this
+  person and this dilemma, the labels could have been attached to any of these
+  responses". The test shuffles the label inside each block. This matters in
+  both directions: it stops the between-dilemma effect (which is large) from
+  being read as a facet effect, and it is *more* sensitive than the pooled
+  test, because the person and the dilemma are differenced out rather than
+  left in the residual.
+
+* **A demographic attribute belongs to a person.** Twenty-five personas carry
+  about twelve thousand responses between them, and an attribute is constant
+  across all of one person's rows. A test that counts responses reports a
+  five-decimal p-value off an effective n of 25. The test shuffles the
+  person-to-attribute map instead. Both p-values are on the table so the size
+  of that gap is visible rather than something to take on trust.
+
+* **Sycophancy is dominated by the dilemma.** Some stories are absolved
+  whatever the model thinks it is talking to. The "most" and "least"
+  sycophantic thirds are therefore cut inside each dilemma, and the contrast is
+  pooled across them.
+
+### Two p-values on every per-cell table
+
+A Monte-Carlo p-value cannot fall below `1 / (draws + 1)`. That is harmless for
+a dozen omnibus tests and fatal for a family of several thousand cells: at
+2,000 draws the smallest attainable p is 5e-4, and Benjamini-Hochberg over
+3,500 tests then cannot produce a q-value below 1 no matter what the data says.
+Every cell would report "not significant" for a reason that is about the number
+of shuffles drawn.
+
+So each per-cell table carries both. `p_monte_carlo` is the share of shuffles
+at least as extreme -- assumption-free, and floored. `p_normal` is the z-score
+against the same shuffles' own mean and standard deviation -- unfloored, and
+justified because these are counts summed over hundreds of exchangeable blocks.
+`q_normal` corrects `p_normal`, and `testable` marks the cells where the
+approximation is safe: the null has to vary, and the expected count has to
+reach 5. Cells that fail that keep their Monte-Carlo p and an explicit empty
+q-value rather than one the approximation cannot support.
+
+### Words and bigrams, and what gets dropped from them
+
+Section 0 is the paper's descriptive pass: `syco.topics.ngram_frequencies` over
+the assumption explanations, per persona type, per side of the story, and per
+crossing of the two. Beside it, `term_contrasts.csv` gives the z-scored
+log-odds of what one condition says *more* than another -- the frequency table
+alone cannot separate conditions, because its top is what they all share.
+
+Two things are removed by default and both are switchable.
+
+* **Function words, from bigrams as well as unigrams** (`--stopwords all`).
+  The paper keeps them in bigrams -- its own table reports "rather than" and
+  "may have" -- but over this corpus that yields "user a", "a is", "may be".
+  `--stopwords unigrams` restores the paper's setting.
+* **The words the probe supplies** (`syco.topics.PROMPT_ECHO`). The instrument
+  addresses the person as "User A", so `user` appears in 99% of the assumptions
+  and half the top bigrams were `user <something>`. That is the prompt echoing,
+  not the model choosing. `--keep-prompt-echo` leaves them in.
+
+With both applied the top bigrams become "setting boundaries", "personal
+space", "high standards", "feeling overwhelmed".
+
+### Which text gets clustered
+
+`--field description` (the default, matching `syco topics` and the paper's own
+frequency tables) clusters the explanation the model gave for each mental
+model. `--field assumption` clusters the short label alone.
+
+The trade is worth knowing. A description restates the dilemma, so some of its
+clusters are one story's furniture -- "the wedding", "the barista", "the hotel
+guest" -- which cannot move across dilemmas. A label is the model's
+characterization of the person -- "Guilt-Ridden Friend", "Autonomy Seeker" --
+so its clusters cut across dilemmas, but it is a much thinner string to
+cluster. Either way `shared/topics.csv` carries `dilemma_spread` per topic, so
+a story-specific cluster is visible as one, and every contrast in every section
+holds the dilemma fixed regardless.
+
+### The demographics file is not used
+
+`files/personas_demographics_vulnerability_final.csv` codes each of the 200
+personas for age, gender, education, income, religion, political leaning and
+four vulnerability indices. **None of it is swept.** A run draws 25 of those
+200 people, so every column lands as two or three groups of eight; a
+three-level contrast off eight people per level is not a comparison, and a rank
+correlation over 25 points is not an estimate. Adding it back would produce
+thirteen more dropdowns of nothing.
+
+What the persona side of the study can support is the transcripts themselves,
+and there are 250 of them (25 people x 10 persona types).
+`persona_words_by_topic.csv` splits them at the terciles of how often the model
+gave that transcript a given topic and contrasts the two thirds' wording with
+Fightin' Words. The tercile split rather than presence/absence is forced by the
+design: each transcript draws about forty responses, so for any common topic
+nearly every persona gets it at least once and there is no comparison group
+left. `persona_words_by_assumption.csv` runs the repo's own
+`marked_words_by_assumption` at the verbatim-label level, where presence and
+absence still both occur.
+
+### Reading the sycophancy section
+
+**Every join is within-model.** Each analyzed model is matched to its own
+forced-choice collection, looked for under `results/sycophancy/` and `files/`
+by name; `--scores ALIAS=PATH` overrides the match and the resolved mapping is
+printed. A model with no collection of its own is **skipped** and named in
+`sycophancy_coverage.csv`. Scoring it against another model's numbers would
+answer a different question -- which (persona, dilemma) cells invite the
+behaviour -- while reading as if it were about the responding model.
+
+The primary outcome is the **continuous** log-odds, not the 0/1 indicator. The
+indicator is constant inside all but a handful of dilemmas, so a within-dilemma
+contrast on it is estimated off those few and reports a null that belongs to
+the threshold. `sycophancy_coverage.csv` puts `dilemmas_binary_varies` next to
+`dilemmas_logit_varies` so the difference is on the page. The probability
+`sycophancy_soft` is not used at all: it saturates within 1e-8 of 0 or 1, so
+its within-dilemma variance is floating-point noise and differences of a
+millionth come back at p = 1e-9.
 
 ## What's deliberately not here
 

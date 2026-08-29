@@ -1,4 +1,5 @@
 """Profile-driven orchestration behind ``python -m syco``."""
+
 from __future__ import annotations
 
 import contextlib
@@ -14,7 +15,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from syco.experiments import ExperimentProfile
-from syco.manifest import build_manifest, load_manifest, write_manifest
+from syco.manifest import (
+    build_manifest,
+    identity_conflicts,
+    load_manifest,
+    write_manifest,
+)
 from syco.model_registry import LLAMACPP_BACKEND, load_registry
 from syco.store import canonical_rows, read_rows
 
@@ -38,18 +44,32 @@ def _command(profile: ExperimentProfile, spec, *extra: str) -> list[str]:
     return [sys.executable, "-m", "syco", "run", *profile.run_args(spec), *extra]
 
 
-def _expected_manifest(profile: ExperimentProfile, registry, spec) -> dict:
-    """Manifest a fresh run under the current profile would produce."""
-    from scripts.run_assumptions import configured_spec, parse_args
+def _planned_run(profile: ExperimentProfile, registry, spec):
+    """The plan and manifest a fresh run under the current profile would produce.
+
+    Both come from the runner's own `build_plan`, so orchestration can never
+    disagree with acquisition about which cells a profile administers.
+    """
+    from scripts.run_assumptions import build_plan, configured_spec, parse_args
     from syco.prompts import ProbeSpec
 
     args = parse_args(profile.run_args(spec))
     effective_spec = configured_spec(args, registry)
-    probe = ProbeSpec(
-        kind=args.probe,
-        n_models=args.n_models,
+    probe = ProbeSpec(kind=args.probe, n_models=args.n_models)
+    plan = build_plan(args, probe)
+    manifest = build_manifest(
+        args=args,
+        spec=effective_spec,
+        probe=probe,
+        extension=plan.extension.identity if plan.extension else None,
+        frozen_design=plan.frozen_design,
+        coordinates=plan.coordinates,
     )
-    return build_manifest(args=args, spec=effective_spec, probe=probe)
+    return plan, manifest
+
+
+def _expected_manifest(profile: ExperimentProfile, registry, spec) -> dict:
+    return _planned_run(profile, registry, spec)[1]
 
 
 def query_gpus() -> list[GPU]:
@@ -66,7 +86,9 @@ def query_gpus() -> list[GPU]:
             stderr=subprocess.PIPE,
         )
     except FileNotFoundError as err:
-        raise RuntimeError("nvidia-smi is not installed; no NVIDIA GPUs are available") from err
+        raise RuntimeError(
+            "nvidia-smi is not installed; no NVIDIA GPUs are available"
+        ) from err
     except subprocess.CalledProcessError as err:
         raise RuntimeError(f"nvidia-smi failed: {err.stderr.strip()}") from err
     gpus = []
@@ -139,10 +161,7 @@ def run_all(
 
     initial_gpus = query_gpus()
     largest_gpu = max(gpu.total_mib for gpu in initial_gpus)
-    impossible = [
-        spec.alias for spec in specs
-        if spec.estimated_vram_mib > largest_gpu
-    ]
+    impossible = [spec.alias for spec in specs if spec.estimated_vram_mib > largest_gpu]
     if impossible:
         raise RuntimeError(
             f"No GPU can fit the configured VRAM requirement for: {', '.join(impossible)}"
@@ -186,7 +205,9 @@ def run_all(
         with profile_lock(profile):
             while queue or running:
                 if stop_requested:
-                    print("interrupt received; terminating child model runs", flush=True)
+                    print(
+                        "interrupt received; terminating child model runs", flush=True
+                    )
                     for item in running.values():
                         item.process.terminate()
                     for item in running.values():
@@ -220,8 +241,11 @@ def run_all(
                     if gpu.index in running:
                         continue
                     fitting = next(
-                        (spec for spec in queue
-                         if spec.estimated_vram_mib <= gpu.free_mib),
+                        (
+                            spec
+                            for spec in queue
+                            if spec.estimated_vram_mib <= gpu.free_mib
+                        ),
                         None,
                     )
                     if fitting is None:
@@ -287,66 +311,97 @@ def run_all(
 def status(profile: ExperimentProfile) -> int:
     registry = load_registry()
     specs = profile.select_models(registry)
-    expected = len(profile.build_cells()[0])
-    print(f"profile: {profile.name} | expected cells/model: {expected}")
+    print(f"profile: {profile.name}")
     incomplete = False
     for spec in specs:
         path = profile.output_for(spec)
+        try:
+            plan, expected_manifest = _planned_run(profile, registry, spec)
+            expected = len(plan.cells)
+        except RuntimeError as err:
+            # A wave cannot be planned until the shards it continues are
+            # collected. Under Slurm's aftercorr that is routine: an extension
+            # array element is released as soon as its own base element ends,
+            # while sibling models are still running. Report why, and keep the
+            # remaining models rather than aborting the whole status command.
+            incomplete = True
+            attempts = read_rows(path)
+            rows, diagnostics = canonical_rows(attempts)
+            successes = sum(not row.get("error") for row in rows)
+            errors = sum(bool(row.get("error")) for row in rows)
+            print(
+                f"  {spec.alias:<20} success={successes:<6} unplannable   "
+                f"errors={errors:<4} attempts={diagnostics['attempts']:<6} {err}"
+            )
+            continue
         manifest = load_manifest(path)
-        expected_manifest = _expected_manifest(profile, registry, spec)
         manifest_state = "current"
         if manifest is None:
             manifest_state = "missing-manifest"
         elif manifest.get("run_id") != expected_manifest.get("run_id"):
-            manifest_state = "stale-manifest"
+            # A different run_id is only a problem when the difference would
+            # change the observations. Code that has moved on since collection
+            # is normal for a study run in waves, and the runner continues such
+            # an output under its recorded identity.
+            conflicts = identity_conflicts(manifest, expected_manifest)
+            manifest_state = "incompatible" if conflicts else "continuable"
         attempts = read_rows(path)
         rows, diagnostics = canonical_rows(attempts)
         successes = sum(not row.get("error") for row in rows)
         errors = sum(bool(row.get("error")) for row in rows)
         missing = max(0, expected - successes)
-        incomplete |= bool(missing or errors or manifest_state != "current")
+        incomplete |= bool(
+            missing or errors or manifest_state in {"missing-manifest", "incompatible"}
+        )
         print(
-            f"  {spec.alias:<20} success={successes:<6} missing={missing:<6} "
+            f"  {spec.alias:<20} success={successes:<6} expected={expected:<6} "
+            f"missing={missing:<6} "
             f"errors={errors:<4} attempts={diagnostics['attempts']:<6} "
             f"manifest={manifest_state:<16} {path}"
         )
     return 1 if incomplete else 0
 
 
-def _comparable_identity(manifest: dict) -> dict:
-    identity = dict(manifest.get("identity") or {})
-    identity.pop("model", None)
-    return identity
-
-
 def merge(profile: ExperimentProfile, *, allow_partial: bool = False) -> int:
     registry = load_registry()
     specs = profile.select_models(registry)
-    expected = len(profile.build_cells()[0])
     merged_rows = []
     reference_identity = None
     input_manifests = []
 
     for spec in specs:
+        plan, expected_manifest = _planned_run(profile, registry, spec)
+        expected = len(plan.cells)
         path = profile.output_for(spec)
         if not path.is_file():
             raise RuntimeError(f"missing model output: {path}")
         manifest = load_manifest(path)
         if manifest is None:
             raise RuntimeError(f"missing run manifest: {path}.manifest.json")
-        expected_manifest = _expected_manifest(profile, registry, spec)
-        if manifest.get("run_id") != expected_manifest.get("run_id"):
+        conflicts = identity_conflicts(manifest, expected_manifest)
+        if conflicts:
             raise RuntimeError(
-                f"{spec.alias} output belongs to run {manifest.get('run_id')}, "
-                f"but the current profile/code is run {expected_manifest.get('run_id')}"
+                f"{spec.alias} output belongs to run {manifest.get('run_id')} and "
+                "the current profile would collect different observations:\n  - "
+                + "\n  - ".join(conflicts)
             )
-        comparable = _comparable_identity(manifest)
+        # Across models, everything but `model` has to agree. Comparing whole
+        # identity dicts instead would refuse any merge spanning two manifest
+        # schema versions, or any wave whose per-model source paths differ --
+        # neither of which is a difference in the experiment.
         if reference_identity is None:
-            reference_identity = comparable
-        elif comparable != reference_identity:
-            raise RuntimeError(
-                f"experiment manifest mismatch for {spec.alias}; refusing to merge"
+            reference_identity = manifest
+        else:
+            across = identity_conflicts(
+                reference_identity,
+                manifest,
+                sections=("instrument", "data", "design"),
             )
+            if across:
+                raise RuntimeError(
+                    f"experiment mismatch for {spec.alias}; refusing to merge:\n  - "
+                    + "\n  - ".join(across)
+                )
         attempts = read_rows(path)
         rows, diagnostics = canonical_rows(attempts)
         wrong_run = [row for row in rows if row.get("run_id") != manifest["run_id"]]
@@ -355,7 +410,9 @@ def merge(profile: ExperimentProfile, *, allow_partial: bool = False) -> int:
         errors = [row for row in rows if row.get("error")]
         successes = [row for row in rows if not row.get("error")]
         if errors and not allow_partial:
-            raise RuntimeError(f"{spec.alias} has {len(errors)} unresolved error cell(s)")
+            raise RuntimeError(
+                f"{spec.alias} has {len(errors)} unresolved error cell(s)"
+            )
         if len(successes) != expected and not allow_partial:
             raise RuntimeError(
                 f"{spec.alias} is incomplete: {len(successes)}/{expected} successful cells"
@@ -383,15 +440,39 @@ def merge(profile: ExperimentProfile, *, allow_partial: bool = False) -> int:
         except FileNotFoundError:
             pass
         raise
-    write_manifest(target, {
-        "schema_version": 1,
-        "kind": "merged",
-        "profile": profile.name,
-        "partial": bool(allow_partial),
-        "inputs": input_manifests,
-        "cells": len(merged_rows),
-    })
+    write_manifest(
+        target,
+        {
+            "schema_version": 1,
+            "kind": "merged",
+            "profile": profile.name,
+            "partial": bool(allow_partial),
+            "inputs": input_manifests,
+            "cells": len(merged_rows),
+        },
+    )
     print(f"merged {len(merged_rows)} canonical row(s) -> {target}")
+    return 0
+
+
+def collect_extension(profile: ExperimentProfile) -> int:
+    """Join every wave of a model's acquisition into one analysis-ready file."""
+    from syco.extensions import collect
+
+    if not profile.is_extension:
+        raise RuntimeError("collect-extension requires an extension profile")
+    if profile.collection_dir is None:
+        raise RuntimeError("extension profile has no output.collection_dir")
+    registry = load_registry()
+    for spec in profile.select_models(registry):
+        shards = [*profile.extension_bases_for(spec), profile.output_for(spec)]
+        combined = collect(
+            shards,
+            profile.collection_output_for(spec),
+            design_lock=profile.design_path,
+            probe=profile.probe_spec.kind,
+        )
+        print(f"  {spec.alias:<20} {len(shards)} shard(s) -> {combined}")
     return 0
 
 
@@ -401,7 +482,7 @@ def parse_all(profile: ExperimentProfile, extra: list[str] | None = None) -> int
     registry = load_registry()
     rc = 0
     for spec in profile.select_models(registry):
-        path = profile.output_for(spec)
+        path = profile.analysis_output_for(spec)
         if not path.is_file():
             print(f"missing: {path}", file=sys.stderr)
             rc = 1
@@ -460,14 +541,15 @@ def smoke(profile: ExperimentProfile, model: str | None = None) -> int:
     spec = registry.get(model) if model else profile.select_models(registry)[0]
     smoke_dir = profile.results_dir / spec.safe_dir_name() / "smoke"
     output = smoke_dir / f"{profile.name}.jsonl"
-    args = [
-        *profile.run_args(spec),
-        "--out", str(output),
-        "--n-personas", "1",
-        "--n-prompts", "1",
-        "--dry-run",
-        "--overwrite",
-    ]
+    args = [*profile.run_args(spec), "--out", str(output), "--dry-run", "--overwrite"]
+    if not profile.is_extension and profile.design_path is None:
+        # Shrink the grid to keep the offline check quick. A frozen design or an
+        # extension fixes exactly which cells exist, so overriding the counts
+        # there would contradict the design rather than sample from it; those
+        # profiles smoke-test with --limit instead.
+        args.extend(("--n-personas", "1", "--n-prompts", "1"))
+    else:
+        args.extend(("--limit", "4"))
     rc = run_main(args)
     if rc:
         return rc
@@ -518,12 +600,16 @@ def doctor(profile: ExperimentProfile) -> int:
     from syco.topics import topics_available
 
     available, why = topics_available()
-    print(f"  {'ok' if available else 'note':<7} topic model        "
-          f"{'bertopic + sentence-transformers' if available else why}")
+    print(
+        f"  {'ok' if available else 'note':<7} topic model        "
+        f"{'bertopic + sentence-transformers' if available else why}"
+    )
     try:
-        cells, diagnostics = profile.build_cells()
+        cells, diagnostics = profile.build_cells(specs[0])
         unusable = int((~diagnostics.usable).sum()) if len(diagnostics) else 0
-        print(f"  ok      data grid: {len(cells)} cells/model, unusable personas={unusable}")
+        print(
+            f"  ok      data grid: {len(cells)} cells/model, unusable personas={unusable}"
+        )
     except Exception as err:
         failed = True
         print(f"  FAILED  data/profile: {type(err).__name__}: {err}")

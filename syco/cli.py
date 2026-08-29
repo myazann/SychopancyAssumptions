@@ -1,4 +1,5 @@
 """Unified command line interface for the assumptions study."""
+
 from __future__ import annotations
 
 import argparse
@@ -18,6 +19,7 @@ Commands:
   run --all              schedule every profile model across available GPUs
   status                 show successful, missing, error, and attempt counts
   merge                  validate and merge canonical per-model outputs
+  collect-extension      join every wave of a study into one analysis-ready file
   parse INPUT ...        parse one open-ended or structured JSONL output
   parse --all            parse every per-model output independently
   summarize INPUT ...    summarize one parsed assumptions/scores table
@@ -31,6 +33,9 @@ Commands:
   analyze [options]      the three analyses of the open-ended grid: persona
                          facet and framing, demographics, and sycophancy ->
                          a directory of tables, figures, and findings
+  design STAGE ...       freeze, verify, or extend a study design; a frozen
+                         design lets acquisition continue in waves
+  snapshot STAGE ...     capture or verify a study snapshot
   pipeline               run-all, merge, parse-all, summarize-all, topics-all
 
 Profile commands default to config/experiments/default.yaml. Override with:
@@ -40,8 +45,11 @@ Profile commands default to config/experiments/default.yaml. Override with:
 
 def _profile_parser(description: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=description)
-    parser.add_argument("--profile", default="default",
-                        help="profile name or YAML path (default: default)")
+    parser.add_argument(
+        "--profile",
+        default="default",
+        help="profile name or YAML path (default: default)",
+    )
     return parser
 
 
@@ -53,8 +61,10 @@ def _models() -> int:
     from syco.model_registry import load_registry
 
     registry = load_registry()
-    header = (f"{'alias':<22} {'family':<8} {'backend':<10} {'quant':<14} "
-              f"{'VRAM MiB':<9} {'ref'}")
+    header = (
+        f"{'alias':<22} {'family':<8} {'backend':<10} {'quant':<14} "
+        f"{'VRAM MiB':<9} {'ref'}"
+    )
     print(header)
     print("-" * len(header))
     for spec in registry.select(include_disabled=True):
@@ -71,10 +81,18 @@ def _run_all(argv: list[str]) -> int:
     from syco.orchestrate import run_all
 
     parser = _profile_parser("Schedule all models in an experiment profile")
-    parser.add_argument("--limit-per-model", type=int, default=None,
-                        help="run at most N additional cells per model")
-    parser.add_argument("--wait-timeout", type=int, default=None,
-                        help="fail after N seconds unable to fit a queued model")
+    parser.add_argument(
+        "--limit-per-model",
+        type=int,
+        default=None,
+        help="run at most N additional cells per model",
+    )
+    parser.add_argument(
+        "--wait-timeout",
+        type=int,
+        default=None,
+        help="fail after N seconds unable to fit a queued model",
+    )
     args = parser.parse_args(argv)
     if args.limit_per_model is not None and args.limit_per_model <= 0:
         parser.error("--limit-per-model must be positive")
@@ -112,7 +130,14 @@ def _topics_all(argv: list[str]) -> int:
 
 
 def _pipeline(argv: list[str]) -> int:
-    from syco.orchestrate import merge, parse_all, run_all, summarize_all, topics_all
+    from syco.orchestrate import (
+        collect_extension,
+        merge,
+        parse_all,
+        run_all,
+        summarize_all,
+        topics_all,
+    )
 
     parser = _profile_parser("Run, validate, parse, and summarize a profile")
     parser.add_argument("--wait-timeout", type=int, default=None)
@@ -121,7 +146,7 @@ def _pipeline(argv: list[str]) -> int:
     rc = run_all(profile, wait_timeout_seconds=args.wait_timeout)
     if rc:
         return rc
-    rc = merge(profile)
+    rc = collect_extension(profile) if profile.is_extension else merge(profile)
     if rc:
         return rc
     rc = parse_all(profile)
@@ -146,55 +171,83 @@ def main(argv: list[str] | None = None) -> int:
             if "--all" in rest:
                 return _run_all([item for item in rest if item != "--all"])
             from scripts.run_assumptions import main as run_main
+
             return run_main(rest)
         if command == "parse":
             if "--all" in rest:
                 return _parse_all([item for item in rest if item != "--all"])
             from scripts.parse_assumptions import main as parse_main
+
             return parse_main(rest)
         if command == "summarize":
             if "--all" in rest:
                 return _summarize_all([item for item in rest if item != "--all"])
             from scripts.summarize_assumptions import main as summarize_main
+
             return summarize_main(rest)
         if command == "topics":
             if "--all" in rest:
                 return _topics_all([item for item in rest if item != "--all"])
             from scripts.topic_assumptions import main as topics_main
+
             return topics_main(rest)
         if command == "sycophancy":
             from scripts.score_sycophancy import main as sycophancy_main
+
             return sycophancy_main(rest)
         if command == "text":
             from scripts.analyze_text import main as text_main
+
             return text_main(rest)
         if command == "analyze":
             from scripts.analyze_openended import main as analyze_main
+
             return analyze_main(rest)
+        if command == "design":
+            from syco.design import main as design_main
+
+            return design_main(rest)
+        if command == "snapshot":
+            from syco.snapshot import main as snapshot_main
+
+            return snapshot_main(rest)
         if command == "plan":
             from syco.orchestrate import plan
+
             parser = _profile_parser("Plan every model in a profile")
             args = parser.parse_args(rest)
             return plan(_profile_from(args))
         if command == "status":
             from syco.orchestrate import status
+
             parser = _profile_parser("Show completion status")
             args = parser.parse_args(rest)
             return status(_profile_from(args))
         if command == "merge":
             from syco.orchestrate import merge
+
             parser = _profile_parser("Validate and merge model outputs")
             parser.add_argument("--allow-partial", action="store_true")
             args = parser.parse_args(rest)
             return merge(_profile_from(args), allow_partial=args.allow_partial)
+        if command == "collect-extension":
+            from syco.orchestrate import collect_extension
+
+            parser = _profile_parser(
+                "Combine complete base and extension acquisition shards"
+            )
+            args = parser.parse_args(rest)
+            return collect_extension(_profile_from(args))
         if command == "smoke":
             from syco.orchestrate import smoke
+
             parser = _profile_parser("Run the offline end-to-end smoke test")
             parser.add_argument("--model", default=None)
             args = parser.parse_args(rest)
             return smoke(_profile_from(args), args.model)
         if command == "doctor":
             from syco.orchestrate import doctor
+
             parser = _profile_parser("Validate the local environment")
             args = parser.parse_args(rest)
             return doctor(_profile_from(args))

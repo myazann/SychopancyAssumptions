@@ -1,0 +1,271 @@
+{
+  "design_id": "e7b7d58cceaba103dfede71d215198ead36a44912b9cf591735a0a3c51d93b2c",
+  "identity": {
+    "coordinates_sha256": "315c315363b185599dbbde237e039c2aa56690bedffb30a80f278484627810d4",
+    "data": {
+      "personas_sha256": "95e6a8fa8896c7747d8f765852c6b4fce38de776bf0b3d00d875323c70763c7e",
+      "prompts_sha256": "2929b0a0e450da35dffbc6fb6dff3556a217f4916217212fcde53a160abadcb6"
+    },
+    "expected_coordinates": 32080,
+    "extension": {
+      "added_persona_ids": [
+        "37cbadf3c551458a9e8cd948b703450c",
+        "fcc3b4963e0648d1b43e83aa46e4d0c3",
+        "0f5cb60721e04590bb52ddf29d5bc9e2",
+        "56dabe81f01f40a7bc883c290776c106",
+        "62c96ae87bb848a78de9923ce13c81e3",
+        "efb5cc19bf7c4c6687521d5be1f8ed60",
+        "f5bf404e654944fd8260dfdd1c107f8d",
+        "23a2c70b8c5b47ddbc1232faedfeac11",
+        "90de4d6f3b804ca49681545858776731",
+        "7a701f7702fc475289a22d8b61b8d7f3",
+        "240ec6f9b21e4626a08e7a395ed772d7",
+        "0107c2c6cf6b4070ba688ec03ba0e0d2",
+        "02c17e2c1e0a4eb78a3ada09d032e4b6",
+        "1b8e36fce5d942c78be06618459dd854",
+        "e7a7faf2963c407bb4532f3edc6737ef",
+        "458f98b68d6e4ab8a440ee6d06f0add7",
+        "99b777cfe9ad4b18b44572552bdc8513",
+        "a19ca3a17f5d4a518f46ded63bdc4dc4",
+        "8e9d18c5b29f45869a951f06d9e78932",
+        "d6e5d5b66abf403ca3d597c06fa90cff"
+      ],
+      "added_prompt_ids": [
+        "errpxw",
+        "ceobg4",
+        "ata25i",
+        "cqbbkv",
+        "aey6au",
+        "dw1kdw",
+        "azdt46",
+        "b3mutb",
+        "eh0ezw",
+        "b116tz",
+        "as6lap",
+        "btd1n3",
+        "dvru3p",
+        "byhilc",
+        "ckhq4w",
+        "b93we3",
+        "a1qf57",
+        "bhypom",
+        "b4cffz",
+        "evn6ok"
+      ],
+      "base_persona_ids": [
+        "d39adc6684584d7eb7d678e40899c746",
+        "dded192341374648916ced22b95e76a8",
+        "118202d86e694456813add4a335412bd",
+        "1e0e681080f149139d3c654a0577826c",
+        "1208aa8c41bb4838b45324b37b364d7d",
+        "ba7d4d28ec9b44659f2b1cb1c4a1c25f",
+        "cbef4f983a1747c08f6042a1c322e661",
+        "5c9c7d8511064f3f9854d7946845633a",
+        "89f274986836494f94e9532f113817f6",
+        "ed3825c55c4a48d382be53c49ddeac46",
+        "0df713dc98374e25b502975312422359",
+        "b9e7d7371f5344d984350178dd870b1a",
+        "f0dc026b14c04173a71b852f66634d32",
+        "ff600b7f5ec54a959d8692236364c7ea",
+        "760156709af740cdb96f0c3b4f2a4e43",
+        "79769c789290487186ef0d8fce809ff7",
+        "5005df5d8ac342c187414f631eabe2f0",
+        "42e5a4e93de7454a832e6e53e9891994",
+        "34da8230743948048386761f7b31a1a7",
+        "ffe5decb30254c959d700e6354e3e958"
+      ],
+      "base_prompt_ids": [
+        "dtag51",
+        "e5m77u",
+        "elejtg",
+        "9ztw6t",
+        "bwsgcv",
+        "dbg03j",
+        "b38ju6",
+        "eooa9k",
+        "emze6y",
+        "b2a1md",
+        "c9swu0",
+        "ckdfhy",
+        "a6hmqy",
+        "8iiwtz",
+        "ee91fd",
+        "dc92vv",
+        "drdykq",
+        "cpngpe",
+        "cusibn",
+        "chr65e"
+      ],
+      "mode": "full-cross",
+      "parent_design_id": "0b254a0736385ff0a1af413082f35bf39cb28e34a718965b74d98a1c8b4b2a41"
+    },
+    "factors": {
+      "control": {
+        "persona_id": "none",
+        "persona_type": "none"
+      },
+      "include_control": true,
+      "n_reps": 1,
+      "persona_types": [
+        "hobbies",
+        "motivation",
+        "recognition",
+        "life_story",
+        "crossroads",
+        "family",
+        "influence",
+        "setback",
+        "politics",
+        "assumptions"
+      ],
+      "prompt_types": [
+        "original_post",
+        "flipped_story"
+      ]
+    },
+    "instruments": [
+      {
+        "dimensions": [
+          "validation_seeking",
+          "user_rightness",
+          "user_information_advantage",
+          "objectivity_seeking"
+        ],
+        "expected_cells": 32080,
+        "family": "structured",
+        "n_models": null,
+        "probe": "4dims",
+        "system": "",
+        "thinking": false
+      },
+      {
+        "dimensions": [
+          "emotional_support",
+          "social_companionship",
+          "belonging_support",
+          "information_guidance",
+          "tangible_support"
+        ],
+        "expected_cells": 32080,
+        "family": "structured",
+        "n_models": null,
+        "probe": "supporttypes",
+        "system": "",
+        "thinking": false
+      }
+    ],
+    "name": "structured-40x40",
+    "selection": {
+      "persona_ids": [
+        "d39adc6684584d7eb7d678e40899c746",
+        "dded192341374648916ced22b95e76a8",
+        "118202d86e694456813add4a335412bd",
+        "1e0e681080f149139d3c654a0577826c",
+        "1208aa8c41bb4838b45324b37b364d7d",
+        "ba7d4d28ec9b44659f2b1cb1c4a1c25f",
+        "cbef4f983a1747c08f6042a1c322e661",
+        "5c9c7d8511064f3f9854d7946845633a",
+        "89f274986836494f94e9532f113817f6",
+        "ed3825c55c4a48d382be53c49ddeac46",
+        "0df713dc98374e25b502975312422359",
+        "b9e7d7371f5344d984350178dd870b1a",
+        "f0dc026b14c04173a71b852f66634d32",
+        "ff600b7f5ec54a959d8692236364c7ea",
+        "760156709af740cdb96f0c3b4f2a4e43",
+        "79769c789290487186ef0d8fce809ff7",
+        "5005df5d8ac342c187414f631eabe2f0",
+        "42e5a4e93de7454a832e6e53e9891994",
+        "34da8230743948048386761f7b31a1a7",
+        "ffe5decb30254c959d700e6354e3e958",
+        "37cbadf3c551458a9e8cd948b703450c",
+        "fcc3b4963e0648d1b43e83aa46e4d0c3",
+        "0f5cb60721e04590bb52ddf29d5bc9e2",
+        "56dabe81f01f40a7bc883c290776c106",
+        "62c96ae87bb848a78de9923ce13c81e3",
+        "efb5cc19bf7c4c6687521d5be1f8ed60",
+        "f5bf404e654944fd8260dfdd1c107f8d",
+        "23a2c70b8c5b47ddbc1232faedfeac11",
+        "90de4d6f3b804ca49681545858776731",
+        "7a701f7702fc475289a22d8b61b8d7f3",
+        "240ec6f9b21e4626a08e7a395ed772d7",
+        "0107c2c6cf6b4070ba688ec03ba0e0d2",
+        "02c17e2c1e0a4eb78a3ada09d032e4b6",
+        "1b8e36fce5d942c78be06618459dd854",
+        "e7a7faf2963c407bb4532f3edc6737ef",
+        "458f98b68d6e4ab8a440ee6d06f0add7",
+        "99b777cfe9ad4b18b44572552bdc8513",
+        "a19ca3a17f5d4a518f46ded63bdc4dc4",
+        "8e9d18c5b29f45869a951f06d9e78932",
+        "d6e5d5b66abf403ca3d597c06fa90cff"
+      ],
+      "prompt_ids": [
+        "dtag51",
+        "e5m77u",
+        "elejtg",
+        "9ztw6t",
+        "bwsgcv",
+        "dbg03j",
+        "b38ju6",
+        "eooa9k",
+        "emze6y",
+        "b2a1md",
+        "c9swu0",
+        "ckdfhy",
+        "a6hmqy",
+        "8iiwtz",
+        "ee91fd",
+        "dc92vv",
+        "drdykq",
+        "cpngpe",
+        "cusibn",
+        "chr65e",
+        "errpxw",
+        "ceobg4",
+        "ata25i",
+        "cqbbkv",
+        "aey6au",
+        "dw1kdw",
+        "azdt46",
+        "b3mutb",
+        "eh0ezw",
+        "b116tz",
+        "as6lap",
+        "btd1n3",
+        "dvru3p",
+        "byhilc",
+        "ckhq4w",
+        "b93we3",
+        "a1qf57",
+        "bhypom",
+        "b4cffz",
+        "evn6ok"
+      ]
+    }
+  },
+  "kind": "syco-design-lock",
+  "provenance": {
+    "base_outputs": [
+      "results/Qwen3.6-35B-A3B/4dims.jsonl",
+      "results/Qwen3.6-35B-A3B/supporttypes.jsonl"
+    ],
+    "selection_seed": 1000,
+    "source_digests": [
+      "bd05a4761773f9aef398c0c2de5f7f538f7b61a10a13c3c5e1b031323ef38dc5"
+    ],
+    "source_manifests": [
+      "results/extensions/structured-40x40/Qwen3.6-35B-A3B/4dims.jsonl.manifest.json",
+      "results/extensions/structured-40x40/Qwen3.6-35B-A3B/supporttypes.jsonl.manifest.json"
+    ],
+    "source_runs": [
+      {
+        "probe": "4dims",
+        "run_id": "2152a2ce3c7e394d5b16"
+      },
+      {
+        "probe": "supporttypes",
+        "run_id": "9c31e03e8effebe67d7e"
+      }
+    ]
+  },
+  "schema_version": 1
+}
