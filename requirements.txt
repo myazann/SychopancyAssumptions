@@ -19,6 +19,17 @@ openpyxl>=3.1,<4
 huggingface_hub>=0.28,<2
 transformers>=4.56,<6
 
+# Linear assumption probes: HF model placement/hooking, persisted checkpoints,
+# Ridge fitting, and progress-safe long jobs. bitsandbytes is used only when a
+# probe config explicitly selects bnb-4bit/bnb-8bit; the default Llama run is
+# BF16, but declaring the selectable path keeps the environment reproducible.
+torch>=2.3,<3
+accelerate>=1,<2
+safetensors>=0.4,<1
+scikit-learn>=1.4,<2
+tqdm>=4.66,<5
+bitsandbytes>=0.45,<1
+
 # Enabled local GGUF models. See README.md for NVIDIA/CUDA installation notes.
 llama-cpp-python>=0.3.16,<0.4
 

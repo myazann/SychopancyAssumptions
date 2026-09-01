@@ -11,6 +11,8 @@ The base data belongs in `files/` and is available from the
 
 - [PIPELINE.md](PIPELINE.md) explains the study design, output, and advanced
   operations.
+- [docs/linear_probe.md](docs/linear_probe.md) specifies the fresh-label Ridge
+  probe and causal steering pipeline, its open decisions, and L40 estimate.
 - `config/models.yaml` defines model aliases, backends, and VRAM estimates.
 - `config/experiments/default.yaml` defines the default experiment.
 - `config/designs/` contains frozen, exact study designs used directly by
@@ -59,9 +61,10 @@ CMAKE_ARGS="-DGGML_CUDA=on" python -m pip install --upgrade --force-reinstall \
     llama-cpp-python --no-cache-dir
 ```
 
-The disabled Transformers backend is not part of the default installation. To
-use an `hf` model such as `Gemma3-12B-hf`, additionally install `torch` and
-`accelerate`; its configured 4-bit mode also needs `bitsandbytes`.
+The linear-probe path uses Transformers/PyTorch because GGUF inference cannot
+expose block activations or accept residual hooks. Its default Llama target is
+BF16; `bitsandbytes` is used only when a probe config selects 4- or 8-bit HF
+loading.
 
 ## Check the experiment
 
@@ -71,7 +74,27 @@ These commands do not call a real model:
 python -m syco models       # list model aliases and backends
 python -m syco smoke        # offline generation -> parse -> summarize
 python -m syco plan         # print the exact default grid
+python -m syco linear-probe plan  # fresh-label probe design and workload
 ```
+
+## Fresh-label linear probes
+
+The new linear-probe pipeline starts from Qwen labels generated into its own
+artifact namespace; it never imports the existing structured labels. Begin
+with planning and a small strict-parser audit:
+
+```bash
+python -m syco linear-probe plan
+python -m syco linear-probe label --dry-run --limit 20
+python -m syco linear-probe parse-labels --dry-run --allow-partial
+```
+
+The production stages are `freeze`, `label`, `parse-labels`, `extract`,
+`train`, `steer`, and `evaluate`. Do not launch them as an unreviewed chain:
+the recommended first real step is a 200-call Qwen throughput/label-quality
+benchmark. See [the full probe specification](docs/linear_probe.md) for exact
+schemas, split rules, validation gates, artifacts, commands, and resource
+estimates.
 
 ## Run one model
 
@@ -165,8 +188,11 @@ python -m syco analyze \
    score -- a model with no collection of its own is skipped rather than
    scored against another model's.
 
-The demographics file is deliberately unused: a run draws 25 of its 200
-personas, so every column in it becomes two or three groups of eight.
+This legacy `analyze` command deliberately leaves demographics unused: a run
+draws 25 of its 200 personas, so every column becomes two or three groups of
+eight. The separate fresh-label linear-probe pipeline freezes the exact selected
+demographic rows for a later, larger heterogeneity study but does not use them
+to select probes or steering directions.
 
 It writes `results/analysis/KEY_FINDINGS.md`, a self-contained
 `results/analysis/report.html`, a `README.md` and a set of CSVs per section,

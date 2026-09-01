@@ -3,8 +3,10 @@ name = "syco-assumptions-study"
 version = "0.1.0"
 requires-python = "==3.12.*"
 dependencies = [
+  "accelerate>=1,<2",
   "anthropic>=0.125,<1",
   "bertopic>=0.16,<0.18",
+  "bitsandbytes>=0.45,<1",
   "fastcore>=1.7,<2",
   "huggingface-hub>=0.28,<2",
   "llama-cpp-python>=0.3.16,<0.4",
@@ -16,10 +18,13 @@ dependencies = [
   "pyarrow>=15,<27",
   "pyliwc>=1.5,<2",
   "pyyaml>=6,<7",
+  "safetensors>=0.4,<1",
+  "scikit-learn>=1.4,<2",
   "scipy>=1.11,<2",
   "sentence-transformers>=3,<6",
   "statsmodels>=0.14,<1",
   "torch>=2.3,<3",
+  "tqdm>=4.66,<5",
   "transformers>=4.56,<6",
 ]
 

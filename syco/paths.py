@@ -19,6 +19,7 @@ DATA_DIR = Path(os.environ.get("SYCO_DATA_DIR", ROOT / "files"))
 
 PERSONA_PATH = DATA_DIR / "base_data_persona.gz"
 PROMPT_PATH = DATA_DIR / "base_data_prompt.gz"
+DEMOGRAPHICS_PATH = DATA_DIR / "personas_demographics_vulnerability_final.csv"
 
 # Where runs land.
 RESULTS_DIR = Path(os.environ.get("SYCO_RESULTS_DIR", ROOT / "results"))

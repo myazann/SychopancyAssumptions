@@ -36,6 +36,9 @@ Commands:
   design STAGE ...       freeze, verify, or extend a study design; a frozen
                          design lets acquisition continue in waves
   snapshot STAGE ...     capture or verify a study snapshot
+  linear-probe STAGE     fresh labels, Ridge probes, steering, and evaluation
+                         (stages: plan, freeze, label, parse-labels, extract,
+                         train, steer, evaluate, status)
   pipeline               run-all, merge, parse-all, summarize-all, topics-all
 
 Profile commands default to config/experiments/default.yaml. Override with:
@@ -211,6 +214,10 @@ def main(argv: list[str] | None = None) -> int:
             from syco.snapshot import main as snapshot_main
 
             return snapshot_main(rest)
+        if command in {"linear-probe", "probe"}:
+            from syco.linear_probe.cli import main as linear_probe_main
+
+            return linear_probe_main(rest)
         if command == "plan":
             from syco.orchestrate import plan
 
