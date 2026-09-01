@@ -125,8 +125,12 @@ def aggregate_labels(labels: pd.DataFrame, method: str) -> pd.DataFrame:
     aggregation = "median" if method == "median" else "mean"
     grouped = valid.groupby(["cell_id", "dimension"], as_index=False)["score"]
     result = getattr(grouped, aggregation)()
-    disagreement = valid.groupby(["cell_id", "dimension"])["score"].agg(
-        label_replicates="count", label_std="std", label_min="min", label_max="max"
+    disagreement = valid.groupby(["cell_id", "dimension"]).agg(
+        label_votes=("score", "count"),
+        label_teachers=("label_teacher_id", "nunique"),
+        label_std=("score", "std"),
+        label_min=("score", "min"),
+        label_max=("score", "max"),
     ).reset_index()
     return result.merge(disagreement, on=["cell_id", "dimension"], how="left")
 

@@ -254,8 +254,12 @@ def design_unit_id(cell) -> str:
                        cell.prompt.prompt_id, cell.rep))
 
 
-def label_key(config_digest: str, cell, instrument: str, replicate: int) -> str:
-    return "|".join((config_digest, cell_id(cell), instrument, str(replicate)))
+def label_key(config_digest: str, teacher_id: str, cell, instrument: str,
+              replicate: int) -> str:
+    """Identity of one teacher-specific labeling task."""
+    return "|".join((
+        config_digest, teacher_id, cell_id(cell), instrument, str(replicate)
+    ))
 
 
 def prompt_digest(messages, system: str = "") -> str:

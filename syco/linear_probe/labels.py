@@ -1,4 +1,4 @@
-"""Fresh Qwen labeling with strict schemas and append-safe retry history."""
+"""Multi-teacher GGUF labeling with strict schemas and safe retry history."""
 
 from __future__ import annotations
 
@@ -50,11 +50,11 @@ def _tokenizer_snapshot_fingerprint(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _resolve_pinned_label_spec(spec, labeling):
+def _resolve_pinned_label_spec(spec, teacher):
     """Resolve configured GGUF/tokenizer commits to immutable local paths."""
     if spec.quantization.format != "gguf":
-        if any((labeling.model_file, labeling.model_revision,
-                labeling.model_sha256, labeling.tokenizer_revision)):
+        if any((teacher.model_file, teacher.model_revision,
+                teacher.model_sha256, teacher.tokenizer_revision)):
             raise ValueError(
                 "labeling model_file/revision/SHA pinning is currently implemented "
                 "for the GGUF label backend"
@@ -66,13 +66,13 @@ def _resolve_pinned_label_spec(spec, labeling):
     from syco.model_registry import split_hf_gguf_ref
 
     repo_id, pinned_file = split_hf_gguf_ref(spec.ref)
-    filename = labeling.model_file or pinned_file or spec.quantization.resolved_file
+    filename = teacher.model_file or pinned_file or spec.quantization.resolved_file
     if not filename:
         raise RuntimeError("the GGUF label model has no resolved filename")
     weight_path = Path(hf_hub_download(
         repo_id=repo_id,
         filename=filename,
-        revision=labeling.model_revision,
+        revision=teacher.model_revision,
     ))
     resolved_weight = weight_path.resolve()
     # Hugging Face stores LFS objects under their content SHA-256. Fall back to
@@ -84,10 +84,10 @@ def _resolve_pinned_label_spec(spec, labeling):
         and all(character in "0123456789abcdef" for character in blob_name)
         else sha256_file(resolved_weight)
     )
-    if (labeling.model_sha256 is not None
-            and actual_sha != labeling.model_sha256.lower()):
+    if (teacher.model_sha256 is not None
+            and actual_sha != teacher.model_sha256.lower()):
         raise RuntimeError(
-            f"label weight SHA mismatch: expected {labeling.model_sha256}, "
+            f"label weight SHA mismatch: expected {teacher.model_sha256}, "
             f"resolved {actual_sha}"
         )
 
@@ -96,7 +96,7 @@ def _resolve_pinned_label_spec(spec, labeling):
         raise RuntimeError("the label model has no tokenizer repository")
     tokenizer_path = Path(snapshot_download(
         repo_id=tokenizer_id,
-        revision=labeling.tokenizer_revision,
+        revision=teacher.tokenizer_revision,
         allow_patterns=[
             "*.json", "*.jinja", "*.txt", "*.model", "*.tiktoken",
         ],
@@ -105,12 +105,13 @@ def _resolve_pinned_label_spec(spec, labeling):
     provenance.update({
         "model_repository": repo_id,
         "model_file": filename,
-        "model_revision_requested": labeling.model_revision,
+        "label_teacher_id": teacher.id,
+        "model_revision_requested": teacher.model_revision,
         "model_revision_resolved": weight_path.parent.name,
         "model_weight_sha256": actual_sha,
         "model_weight_bytes": weight_path.stat().st_size,
         "tokenizer_repository": tokenizer_id,
-        "tokenizer_revision_requested": labeling.tokenizer_revision,
+        "tokenizer_revision_requested": teacher.tokenizer_revision,
         "tokenizer_revision_resolved": tokenizer_path.name,
         "tokenizer_snapshot_sha256": _tokenizer_snapshot_fingerprint(
             tokenizer_path
@@ -125,27 +126,60 @@ def _resolve_pinned_label_spec(spec, labeling):
     return local_spec, provenance
 
 
-def raw_label_paths(artifacts) -> list:
+def raw_label_paths(artifacts, teacher_id: str | None = None) -> list:
     paths = []
     if artifacts.raw_labels.is_file():
         paths.append(artifacts.raw_labels)
     paths.extend(sorted(artifacts.raw_labels.parent.glob("raw.shard-*-of-*.jsonl")))
+    if teacher_id is None:
+        paths.extend(sorted(
+            artifacts.raw_labels.parent.glob("raw.teacher-*.jsonl")
+        ))
+    else:
+        single = artifacts.raw_labels.parent / f"raw.teacher-{teacher_id}.jsonl"
+        if single.is_file():
+            paths.append(single)
+        paths.extend(sorted(artifacts.raw_labels.parent.glob(
+            f"raw.teacher-{teacher_id}.shard-*-of-*.jsonl"
+        )))
     return paths
 
 
-def read_all_raw_labels(artifacts) -> list[dict]:
+def read_all_raw_labels(artifacts, teacher_id: str | None = None) -> list[dict]:
     rows = []
-    for path in raw_label_paths(artifacts):
+    for path in raw_label_paths(artifacts, teacher_id):
         rows.extend(read_jsonl(path))
     return rows
 
 
-def shard_raw_path(artifacts, shard_index: int, num_shards: int):
+def shard_raw_path(artifacts, teacher_id: str, shard_index: int,
+                   num_shards: int):
     if num_shards == 1:
-        return artifacts.raw_labels
+        return artifacts.raw_labels.parent / f"raw.teacher-{teacher_id}.jsonl"
     return artifacts.raw_labels.parent / (
-        f"raw.shard-{shard_index:03d}-of-{num_shards:03d}.jsonl"
+        f"raw.teacher-{teacher_id}.shard-{shard_index:03d}-of-"
+        f"{num_shards:03d}.jsonl"
     )
+
+
+def teacher_work_manifest_path(artifacts, teacher_id: str) -> Path:
+    return artifacts.labels_dir / f"work_manifest.teacher-{teacher_id}.json"
+
+
+def _select_teacher(labeling, teacher_id: str | None):
+    if teacher_id is None:
+        if len(labeling.models) != 1:
+            choices = ", ".join(model.id for model in labeling.models)
+            raise ValueError(
+                "multiple label teachers are configured; choose one with "
+                f"--teacher ({choices})"
+            )
+        return labeling.models[0]
+    matches = [model for model in labeling.models if model.id == teacher_id]
+    if not matches:
+        choices = ", ".join(model.id for model in labeling.models)
+        raise ValueError(f"unknown label teacher {teacher_id!r}; choose {choices}")
+    return matches[0]
 
 
 def strict_parse_label(raw: str, instrument: str) -> list[dict]:
@@ -248,14 +282,17 @@ def _completed(rows: list[dict], labeling) -> tuple[set[str], Counter, set[str]]
 
 def run_labeling(config, artifacts, *, dry_run: bool = False,
                  limit: int | None = None, shard_index: int = 0,
-                 num_shards: int = 1) -> dict:
+                 num_shards: int = 1, teacher_id: str | None = None) -> dict:
     """Generate raw labels. A task is complete only after strict validation."""
     freeze_dataset(config, artifacts)
     cells, table = load_frozen_cells(config, artifacts)
+    teacher = _select_teacher(config.labeling, teacher_id)
     if num_shards <= 0 or not 0 <= shard_index < num_shards:
         raise ValueError("label shard must satisfy 0 <= shard_index < num_shards")
-    raw_path = shard_raw_path(artifacts, shard_index, num_shards)
-    existing = read_all_raw_labels(artifacts)
+    raw_path = shard_raw_path(
+        artifacts, teacher.id, shard_index, num_shards
+    )
+    existing = read_all_raw_labels(artifacts, teacher.id)
     done, attempt_counts, exhausted = _completed(existing, config.labeling)
     labels_digest = config.stage_digest("labels")
 
@@ -263,7 +300,9 @@ def run_labeling(config, artifacts, *, dry_run: bool = False,
     for cell, row in zip(cells, table.itertuples(index=False)):
         for instrument in config.labeling.instruments:
             for label_rep in range(config.labeling.replicates):
-                key = label_key(labels_digest, cell, instrument, label_rep)
+                key = label_key(
+                    labels_digest, teacher.id, cell, instrument, label_rep
+                )
                 assigned = int(hashlib.sha256(key.encode()).hexdigest(), 16) % num_shards
                 if assigned != shard_index:
                     continue
@@ -280,23 +319,28 @@ def run_labeling(config, artifacts, *, dry_run: bool = False,
             "valid": 0,
             "invalid": 0,
             "raw_path": str(raw_path),
+            "teacher_id": teacher.id,
         }
 
     spec = None
     adapter = None
     plan = None
-    model_provenance = {"backend": "mock", "model_id": "mock"}
+    model_provenance = {
+        "backend": "mock",
+        "model_id": teacher.model,
+        "label_teacher_id": teacher.id,
+    }
     if not dry_run:
         registry = load_registry()
-        spec = registry.get(config.labeling.model)
-        if spec.quantization.format == "gguf" and not config.labeling.model_file:
+        spec = registry.get(teacher.model)
+        if spec.quantization.format == "gguf" and not teacher.model_file:
             spec = registry.with_resolved_quant(spec)
         elif spec.quantization.format == "gguf":
             spec = replace(
                 spec,
                 quantization=replace(
-                    spec.quantization,
-                    resolved_file=config.labeling.model_file,
+                spec.quantization,
+                    resolved_file=teacher.model_file,
                 ),
             )
         spec = replace(
@@ -307,14 +351,16 @@ def run_labeling(config, artifacts, *, dry_run: bool = False,
             batch_size=config.labeling.batch_size,
         )
         spec, model_provenance = _resolve_pinned_label_spec(
-            spec, config.labeling
+            spec, teacher
         )
     provenance_digest = hashlib.sha256(json.dumps(
         model_provenance, sort_keys=True, separators=(",", ":")
     ).encode()).hexdigest()
-    work_manifest_path = artifacts.labels_dir / "work_manifest.json"
+    work_manifest_path = teacher_work_manifest_path(artifacts, teacher.id)
     work_details = {
         "dataset_manifest_sha256": sha256_file(artifacts.dataset_manifest),
+        "label_teacher_id": teacher.id,
+        "label_model_alias": teacher.model,
         "model_provenance": model_provenance,
         "model_provenance_digest": provenance_digest,
         "dry_run": dry_run,
@@ -415,7 +461,8 @@ def run_labeling(config, artifacts, *, dry_run: bool = False,
                     "instrument": instrument,
                     "label_rep": label_rep,
                     "attempt": attempt,
-                    "label_model": config.labeling.model,
+                    "label_teacher_id": teacher.id,
+                    "label_model": teacher.model,
                     "label_model_provenance_digest": provenance_digest,
                     "temperature": config.labeling.temperature,
                     "thinking": config.labeling.thinking,
@@ -447,7 +494,7 @@ def run_labeling(config, artifacts, *, dry_run: bool = False,
         if adapter is not None:
             adapter.close()
 
-    raw_rows = read_all_raw_labels(artifacts)
+    raw_rows = read_all_raw_labels(artifacts, teacher.id)
     manifest = stage_manifest(
         config,
         "labels_raw",
@@ -463,28 +510,81 @@ def run_labeling(config, artifacts, *, dry_run: bool = False,
             "dry_run": dry_run,
             "shard_index": shard_index,
             "num_shards": num_shards,
+            "label_teacher_id": teacher.id,
+            "label_model_alias": teacher.model,
             "model": model_provenance,
             "model_provenance_digest": provenance_digest,
         },
     )
     atomic_json(raw_path.with_suffix(".manifest.json"), manifest)
     return {"planned": planned, "written": written, "valid": valid,
-            "invalid": invalid, "raw_path": str(raw_path)}
+            "invalid": invalid, "raw_path": str(raw_path),
+            "teacher_id": teacher.id}
+
+
+def _teacher_agreement(labels: pd.DataFrame, teachers) -> dict:
+    """Pairwise score agreement for auditing an ensemble before aggregation."""
+    valid = labels[labels.valid_completion & labels.score.notna()]
+    teacher_ids = [teacher.id for teacher in teachers]
+    if len(teacher_ids) < 2 or valid.empty:
+        return {}
+    agreement = {}
+    for dimension, group in valid.groupby("dimension"):
+        # Replicates are first averaged within teacher; cross-teacher agreement
+        # must not mistake repeated calls from one teacher for independent votes.
+        pivot = group.pivot_table(
+            index="cell_id", columns="label_teacher_id", values="score",
+            aggfunc="mean",
+        )
+        pairs = {}
+        for left_index, left in enumerate(teacher_ids):
+            for right in teacher_ids[left_index + 1:]:
+                if left not in pivot or right not in pivot:
+                    continue
+                complete = pivot[[left, right]].dropna()
+                if complete.empty:
+                    continue
+                difference = (complete[left] - complete[right]).abs()
+                correlation = (
+                    complete[left].corr(complete[right])
+                    if len(complete) >= 2 else float("nan")
+                )
+                pairs[f"{left}__{right}"] = {
+                    "n": len(complete),
+                    "mean_absolute_difference": float(difference.mean()),
+                    "median_absolute_difference": float(difference.median()),
+                    "fraction_absolute_difference_above_0_2": float(
+                        (difference > .2).mean()
+                    ),
+                    "pearson": (
+                        float(correlation) if math.isfinite(correlation) else None
+                    ),
+                }
+        agreement[dimension] = pairs
+    return agreement
 
 
 def parse_labels(config, artifacts) -> tuple[pd.DataFrame, dict]:
     """Derive tidy strict labels while retaining quarantined completions."""
     from syco.linear_probe.artifacts import require_manifest
 
-    work_manifest_path = artifacts.labels_dir / "work_manifest.json"
-    work_manifest = require_manifest(
-        work_manifest_path, config, "labels_work"
-    )
-    provenance_digest = (
-        work_manifest.get("details") or {}
-    ).get("model_provenance_digest")
-    if not provenance_digest:
-        raise ValueError("label work manifest has no model provenance digest")
+    work_manifests = {}
+    provenance_by_teacher = {}
+    for teacher in config.labeling.models:
+        work_path = teacher_work_manifest_path(artifacts, teacher.id)
+        work_manifest = require_manifest(work_path, config, "labels_work")
+        details = work_manifest.get("details") or {}
+        if details.get("label_teacher_id") != teacher.id:
+            raise ValueError(
+                f"label work manifest for {teacher.id!r} has the wrong teacher ID"
+            )
+        provenance_digest = details.get("model_provenance_digest")
+        if not provenance_digest:
+            raise ValueError(
+                f"label work manifest for {teacher.id!r} has no provenance digest"
+            )
+        work_manifests[teacher.id] = work_path
+        provenance_by_teacher[teacher.id] = provenance_digest
     raw_paths = raw_label_paths(artifacts)
     raw = read_all_raw_labels(artifacts)
     if not raw:
@@ -501,7 +601,9 @@ def parse_labels(config, artifacts) -> tuple[pd.DataFrame, dict]:
             f"({foreign}); move them to a separate artifact root"
         )
     bad_provenance = sum(
-        row.get("label_model_provenance_digest") != provenance_digest
+        row.get("label_teacher_id") not in provenance_by_teacher
+        or row.get("label_model_provenance_digest")
+        != provenance_by_teacher.get(row.get("label_teacher_id"))
         for row in raw
     )
     if bad_provenance:
@@ -513,24 +615,29 @@ def parse_labels(config, artifacts) -> tuple[pd.DataFrame, dict]:
     cells, dataset = load_frozen_cells(config, artifacts)
     expected_tasks = {}
     for cell, dataset_row in zip(cells, dataset.itertuples(index=False)):
-        for instrument in config.labeling.instruments:
-            for label_rep in range(config.labeling.replicates):
-                key = label_key(labels_digest, cell, instrument, label_rep)
-                expected_tasks[key] = {
-                    "cell_id": cell_id(cell),
-                    "row_index": int(dataset_row.row_index),
-                    "persona_type": cell.persona.persona_type,
-                    "persona_id": cell.persona.persona_id,
-                    "prompt_type": cell.prompt.prompt_type,
-                    "prompt_id": cell.prompt.prompt_id,
-                    "rep": int(cell.rep),
-                    "split": dataset_row.split,
-                    "instrument": instrument,
-                    "label_rep": label_rep,
-                    "prompt_digest": getattr(
-                        dataset_row, f"label_prompt_digest_{instrument}"
-                    ),
-                }
+        for teacher in config.labeling.models:
+            for instrument in config.labeling.instruments:
+                for label_rep in range(config.labeling.replicates):
+                    key = label_key(
+                        labels_digest, teacher.id, cell, instrument, label_rep
+                    )
+                    expected_tasks[key] = {
+                        "cell_id": cell_id(cell),
+                        "row_index": int(dataset_row.row_index),
+                        "persona_type": cell.persona.persona_type,
+                        "persona_id": cell.persona.persona_id,
+                        "prompt_type": cell.prompt.prompt_type,
+                        "prompt_id": cell.prompt.prompt_id,
+                        "rep": int(cell.rep),
+                        "split": dataset_row.split,
+                        "instrument": instrument,
+                        "label_rep": label_rep,
+                        "label_teacher_id": teacher.id,
+                        "label_model": teacher.model,
+                        "prompt_digest": getattr(
+                            dataset_row, f"label_prompt_digest_{instrument}"
+                        ),
+                    }
     expected_keys = set(expected_tasks)
     unexpected_keys = sorted({
         str(row.get("label_key", "<missing>"))
@@ -546,7 +653,7 @@ def parse_labels(config, artifacts) -> tuple[pd.DataFrame, dict]:
     identity_fields = (
         "cell_id", "row_index", "persona_type", "persona_id", "prompt_type",
         "prompt_id", "rep", "split", "instrument", "label_rep",
-        "prompt_digest",
+        "label_teacher_id", "label_model", "prompt_digest",
     )
     for row_number, row in enumerate(raw, start=1):
         expected = expected_tasks[row["label_key"]]
@@ -594,7 +701,9 @@ def parse_labels(config, artifacts) -> tuple[pd.DataFrame, dict]:
         valid = not parse_error and len(parsed) == len(
             STRUCTURED_DIMENSIONS[task["instrument"]]
         )
-        completion_counts[(task["instrument"], valid)] += 1
+        completion_counts[(
+            task["label_teacher_id"], task["instrument"], valid
+        )] += 1
         by_dimension = {item["dimension"]: item for item in parsed}
         for dimension in STRUCTURED_DIMENSIONS[task["instrument"]]:
             item = by_dimension.get(dimension, {})
@@ -611,7 +720,7 @@ def parse_labels(config, artifacts) -> tuple[pd.DataFrame, dict]:
                 "attempt": row.get("attempt"),
             })
     labels = pd.DataFrame(records).sort_values(
-        ["row_index", "instrument", "label_rep", "dimension"]
+        ["row_index", "instrument", "label_teacher_id", "label_rep", "dimension"]
     )
     artifacts.labels.parent.mkdir(parents=True, exist_ok=True)
     _atomic_parquet(labels, artifacts.labels)
@@ -634,21 +743,42 @@ def parse_labels(config, artifacts) -> tuple[pd.DataFrame, dict]:
         "attempt_history": retry,
         "canonical_completions": len(canonical),
         "valid_completions": sum(
-            count for (instrument, valid), count in completion_counts.items() if valid
+            count for key, count in completion_counts.items() if key[-1]
         ),
         "invalid_completions": sum(
-            count for (instrument, valid), count in completion_counts.items() if not valid
+            count for key, count in completion_counts.items() if not key[-1]
         ),
         "expected_completions": expected_completions,
         "missing_completions": len(expected_keys - observed_keys),
         "raw_shards": [str(path) for path in raw_paths],
         "by_instrument": {
             instrument: {
-                "valid": completion_counts[(instrument, True)],
-                "invalid": completion_counts[(instrument, False)],
+                "valid": sum(
+                    completion_counts[(teacher.id, instrument, True)]
+                    for teacher in config.labeling.models
+                ),
+                "invalid": sum(
+                    completion_counts[(teacher.id, instrument, False)]
+                    for teacher in config.labeling.models
+                ),
             }
             for instrument in config.labeling.instruments
         },
+        "by_teacher": {
+            teacher.id: {
+                "model": teacher.model,
+                "valid": sum(
+                    completion_counts[(teacher.id, instrument, True)]
+                    for instrument in config.labeling.instruments
+                ),
+                "invalid": sum(
+                    completion_counts[(teacher.id, instrument, False)]
+                    for instrument in config.labeling.instruments
+                ),
+            }
+            for teacher in config.labeling.models
+        },
+        "teacher_agreement": _teacher_agreement(labels, config.labeling.models),
         "dimensions": summaries,
     }
     atomic_json(artifacts.label_quality, quality)
@@ -659,7 +789,10 @@ def parse_labels(config, artifacts) -> tuple[pd.DataFrame, dict]:
             "raw_label_shards": {
                 str(path): sha256_file(path) for path in raw_paths
             },
-            "work_manifest_sha256": sha256_file(work_manifest_path),
+            "work_manifests_sha256": {
+                teacher_id: sha256_file(path)
+                for teacher_id, path in work_manifests.items()
+            },
             "dataset_manifest_sha256": sha256_file(artifacts.dataset_manifest),
         },
         details=quality,

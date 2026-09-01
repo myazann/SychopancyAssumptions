@@ -52,13 +52,19 @@ def _valid_label(kind="4dims"):
 
 def test_default_config_is_strict_and_leakage_safe():
     config = load_config("config/linear_probe.yaml")
-    assert config.labeling.model == "Qwen3.6-35B-A3B"
+    assert [(model.id, model.model) for model in config.labeling.models] == [
+        ("qwen36_35b_a3b", "Qwen3.6-35B-A3B"),
+        ("gemma3_27b", "Gemma3-27B"),
+    ]
+    assert config.labeling.aggregation == "mean"
     assert config.training.split.group_by == "two_axis"
     assert config.target.overlength == "error"
     assert config.target.pooling == "final_user_mean"
-    assert config.target.layers.explicit[-1] == 31
-    assert config.labeling.model_revision
-    assert config.labeling.model_sha256
+    assert config.target.hf_ref is None
+    assert not config.target.layers.explicit
+    assert config.target.layers.fractions[-1] == 1.0
+    assert all(model.model_revision for model in config.labeling.models)
+    assert all(model.model_sha256 for model in config.labeling.models)
     assert config.steering.answer_yes == "Yes"
     assert config.steering.answer_no == "No"
     with pytest.raises(TypeError, match="must be strings"):
@@ -82,6 +88,23 @@ def test_stage_digests_reuse_upstream_artifacts_for_larger_alpha_grid():
     assert first.labels == second.labels
     assert first.probes == second.probes
     assert first.steering != second.steering
+
+
+def test_selecting_target_reuses_labels_but_changes_activations():
+    config = load_config("config/linear_probe.yaml")
+    selected = replace(
+        config,
+        target=replace(
+            config.target,
+            model="example-target",
+            hf_ref="organization/example-target",
+            tokenizer_ref="organization/example-target",
+            revision="0" * 40,
+        ),
+    )
+    assert config.stage_digest("dataset") == selected.stage_digest("dataset")
+    assert config.stage_digest("labels") == selected.stage_digest("labels")
+    assert config.stage_digest("activations") != selected.stage_digest("activations")
 
 
 def test_sparse_pairs_are_balanced_and_repeatable():
@@ -223,24 +246,31 @@ def test_dry_label_shards_are_disjoint_complete_and_resumable(tmp_path):
     )
     validate(config)
     artifacts = paths_for(config, dry_run=True)
-    first = run_labeling(
-        config, artifacts, dry_run=True, num_shards=2, shard_index=0
-    )
-    second = run_labeling(
-        config, artifacts, dry_run=True, num_shards=2, shard_index=1
-    )
-    assert first["valid"] + second["valid"] == 6
+    with pytest.raises(ValueError, match="--teacher"):
+        run_labeling(config, artifacts, dry_run=True, limit=1)
+    runs = [
+        run_labeling(
+            config, artifacts, dry_run=True, num_shards=2,
+            shard_index=shard_index, teacher_id=teacher.id,
+        )
+        for teacher in config.labeling.models
+        for shard_index in range(2)
+    ]
+    assert sum(run["valid"] for run in runs) == 12
     paths = raw_label_paths(artifacts)
     key_sets = [{row["label_key"] for row in read_jsonl(path)} for path in paths]
-    assert key_sets[0].isdisjoint(key_sets[1])
+    assert len(set().union(*key_sets)) == sum(map(len, key_sets))
     resumed = run_labeling(
-        config, artifacts, dry_run=True, num_shards=2, shard_index=0
+        config, artifacts, dry_run=True, num_shards=2, shard_index=0,
+        teacher_id=config.labeling.models[0].id,
     )
     assert resumed["planned"] == 0
     assert resumed["raw_path"]
     labels, quality = parse_labels(config, artifacts)
-    assert quality["valid_completions"] == quality["expected_completions"] == 6
-    assert len(labels) == 6 * 4
+    assert quality["valid_completions"] == quality["expected_completions"] == 12
+    assert set(quality["by_teacher"]) == {model.id for model in config.labeling.models}
+    assert quality["teacher_agreement"]
+    assert len(labels) == 12 * 4
 
 
 def test_pooling_is_padding_safe():
@@ -283,6 +313,14 @@ def test_block_resolver_and_collector_use_same_modules():
     model = Fake()
     resolved, path = resolve_decoder_blocks(model)
     assert resolved is blocks and path == "model.layers"
+
+    gemma = torch.nn.Module()
+    gemma.model = torch.nn.Module()
+    gemma.model.language_model = torch.nn.Module()
+    gemma.model.language_model.layers = blocks
+    resolved, path = resolve_decoder_blocks(gemma)
+    assert resolved is blocks and path == "model.language_model.layers"
+
     assert candidate_block_indices(3, SimpleNamespace(explicit=(0, 2), fractions=())) == (0, 2)
     collector = BlockCollector(blocks, (0, 2), "attention_mean")
     try:

@@ -62,9 +62,10 @@ CMAKE_ARGS="-DGGML_CUDA=on" python -m pip install --upgrade --force-reinstall \
 ```
 
 The linear-probe path uses Transformers/PyTorch because GGUF inference cannot
-expose block activations or accept residual hooks. Its default Llama target is
-BF16; `bitsandbytes` is used only when a probe config selects 4- or 8-bit HF
-loading.
+expose block activations or accept residual hooks. No probe target is selected
+by default; choose and pin a compatible Hugging Face checkpoint before
+activation extraction. `bitsandbytes` is used only when a probe config selects
+4- or 8-bit HF loading.
 
 ## Check the experiment
 
@@ -79,22 +80,26 @@ python -m syco linear-probe plan  # fresh-label probe design and workload
 
 ## Fresh-label linear probes
 
-The new linear-probe pipeline starts from Qwen labels generated into its own
-artifact namespace; it never imports the existing structured labels. Begin
-with planning and a small strict-parser audit:
+The new linear-probe pipeline starts from independent Qwen3.6-35B-A3B and
+Gemma-3-27B labels generated into their own artifact namespace; it never imports
+the existing structured labels. Begin with planning and a small strict-parser
+audit from both teachers:
 
 ```bash
 python -m syco linear-probe plan
-python -m syco linear-probe label --dry-run --limit 20
+python -m syco linear-probe label --dry-run \
+  --teacher qwen36_35b_a3b --limit 20
+python -m syco linear-probe label --dry-run \
+  --teacher gemma3_27b --limit 20
 python -m syco linear-probe parse-labels --dry-run --allow-partial
 ```
 
 The production stages are `freeze`, `label`, `parse-labels`, `extract`,
 `train`, `steer`, and `evaluate`. Do not launch them as an unreviewed chain:
-the recommended first real step is a 200-call Qwen throughput/label-quality
-benchmark. See [the full probe specification](docs/linear_probe.md) for exact
-schemas, split rules, validation gates, artifacts, commands, and resource
-estimates.
+the recommended first real step is a 200-call throughput, JSON-compliance, and
+label-quality benchmark from each teacher. See [the full probe
+specification](docs/linear_probe.md) for exact schemas, split rules, validation
+gates, artifacts, commands, and resource estimates.
 
 ## Run one model
 

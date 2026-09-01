@@ -24,12 +24,16 @@ STAGES = ("plan", "freeze", "label", "parse-labels", "extract", "train",
 # label-only benchmark on the allocated node before scheduling the full array.
 LABEL_SECONDS_PER_CALL = (3.2, 4.5)
 LEGACY_LABEL_AND_RESPONSE_SECONDS = 6.95
+GEMMA27_LEGACY_SECONDS_PER_CALL = (18.05, 18.89)
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m syco linear-probe",
-        description="Fresh Qwen labels -> target activations -> Ridge probes -> steering",
+        description=(
+            "Fresh multi-teacher labels -> target activations -> Ridge probes "
+            "-> steering"
+        ),
     )
     parser.add_argument("stage", choices=STAGES)
     parser.add_argument(
@@ -64,6 +68,10 @@ def _parser() -> argparse.ArgumentParser:
         "--shard-index", type=int, default=0,
         help="label stage: zero-based shard index (default: 0)",
     )
+    parser.add_argument(
+        "--teacher", default=None,
+        help="label stage: configured teacher ID (required with multiple teachers)",
+    )
     return parser
 
 
@@ -94,13 +102,9 @@ def _in_memory_plan(config) -> pd.DataFrame:
 
 def _plan(config) -> int:
     table = _in_memory_plan(config)
-    label_calls = (len(table) * len(config.labeling.instruments)
-                   * config.labeling.replicates)
-    n_layers = (len(config.target.layers.explicit)
-                or len(config.target.layers.fractions))
-    # Llama-3.1-8B is the shipped default; retain a formula instead of silently
-    # guessing the width for an arbitrary target checkpoint.
-    width = 4096 if "Llama-3.1-8B" in config.target.model else None
+    calls_per_teacher = (len(table) * len(config.labeling.instruments)
+                         * config.labeling.replicates)
+    label_calls = calls_per_teacher * len(config.labeling.models)
     print(f"config:      {config.source_path}")
     print(f"digest:      {config.digest}")
     print("stage IDs:   " + ", ".join(
@@ -117,34 +121,49 @@ def _plan(config) -> int:
     print(
         f"label calls: {label_calls:,} = {len(table):,} cells x "
         f"{len(config.labeling.instruments)} instruments x "
-        f"{config.labeling.replicates} replicate(s)"
+        f"{config.labeling.replicates} replicate(s) x "
+        f"{len(config.labeling.models)} teacher(s)"
     )
+    print("teachers:     " + ", ".join(
+        f"{model.id}={model.model}" for model in config.labeling.models
+    ))
     print(
-        f"label model: {config.labeling.model}; temperature="
-        f"{config.labeling.temperature}; strict JSON; max attempts="
-        f"{config.labeling.max_attempts}"
+        f"sampling:     temperature={config.labeling.temperature}; strict JSON; "
+        f"max attempts={config.labeling.max_attempts}"
     )
     low_hours, high_hours = (
-        label_calls * seconds / 3600 for seconds in LABEL_SECONDS_PER_CALL
+        calls_per_teacher * seconds / 3600 for seconds in LABEL_SECONDS_PER_CALL
     )
-    legacy_hours = label_calls * LEGACY_LABEL_AND_RESPONSE_SECONDS / 3600
+    legacy_hours = (
+        calls_per_teacher * LEGACY_LABEL_AND_RESPONSE_SECONDS / 3600
+    )
     print(
-        f"label time:  provisional {low_hours:.1f}-{high_hours:.1f} GPU-h "
+        f"Qwen time:   provisional {low_hours:.1f}-{high_hours:.1f} GPU-h "
         f"({low_hours / 4:.1f}-{high_hours / 4:.1f} h ideal wall time on four "
         f"fixed shards); legacy labels+reply upper baseline {legacy_hours:.1f} GPU-h"
     )
+    gemma_low, gemma_high = (
+        calls_per_teacher * seconds / 3600
+        for seconds in GEMMA27_LEGACY_SECONDS_PER_CALL
+    )
+    if any(model.model == "Gemma3-27B" for model in config.labeling.models):
+        print(
+            f"Gemma time: conservative prior labels+reply baseline "
+            f"{gemma_low:.1f}-{gemma_high:.1f} GPU-h "
+            f"({gemma_low / 10:.1f}-{gemma_high / 10:.1f} h on ten shards); "
+            "replace with the two-teacher pilot benchmark"
+        )
+    target_name = config.target.hf_ref or "UNSELECTED (labeling can proceed)"
     print(
-        f"target:      {config.target.hf_ref} ({config.target.dtype}); "
+        f"target:      {target_name} ({config.target.dtype}); "
         f"pooling={config.target.pooling}; max_length={config.target.max_length}/"
         f"{config.target.overlength}"
     )
     print(f"blocks:      {list(config.target.layers.explicit) or list(config.target.layers.fractions)}")
-    if width:
-        gib = len(table) * n_layers * width * 2 / 1024 ** 3
-        print(f"activation cache: approximately {gib:.2f} GiB (pooled float16)")
     print(
-        "before the full label stage: run a real --limit 200 benchmark, inspect "
-        "labels/raw.jsonl, then run parse-labels and human-audit a stratified sample"
+        "before the full label stage: run a real --limit 200 benchmark for each "
+        "teacher, inspect raw.teacher-*.jsonl, parse labels, and human-audit a "
+        "stratified sample"
     )
     return 0
 
@@ -182,6 +201,8 @@ def main(argv=None) -> int:
         raise ValueError("--limit applies only to label or extract")
     if args.stage != "label" and (args.num_shards != 1 or args.shard_index != 0):
         raise ValueError("--num-shards/--shard-index apply only to label")
+    if args.stage != "label" and args.teacher is not None:
+        raise ValueError("--teacher applies only to label")
     if args.stage != "parse-labels" and args.allow_partial:
         raise ValueError("--allow-partial applies only to parse-labels")
     if args.num_shards <= 0 or not 0 <= args.shard_index < args.num_shards:
@@ -203,10 +224,12 @@ def main(argv=None) -> int:
         result = run_labeling(
             config, artifacts, dry_run=args.dry_run, limit=args.limit,
             shard_index=args.shard_index, num_shards=args.num_shards,
+            teacher_id=args.teacher,
         )
         elapsed = time.monotonic() - started
         print(
-            f"labeling: planned={result['planned']:,}, attempts={result['written']:,}, "
+            f"labeling[{result['teacher_id']}]: planned={result['planned']:,}, "
+            f"attempts={result['written']:,}, "
             f"valid={result['valid']:,}, invalid={result['invalid']:,}, "
             f"elapsed={elapsed / 60:.1f} min"
         )

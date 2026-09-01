@@ -8,8 +8,9 @@ The implemented sequence is:
 
 ```text
 freeze paired design and splits
-    -> Qwen label-only JSON (raw, append-only)
+    -> independent Qwen + Gemma label-only JSON (raw, append-only)
     -> strict parse and quarantine
+    -> cross-teacher agreement audit and mean score aggregation
     -> exact target-chat activations at candidate decoder blocks
     -> one Ridge probe per dimension and block
     -> validation-only block selection, untouched test evaluation
@@ -17,7 +18,8 @@ freeze paired design and splits
     -> fixed-denominator sycophancy effects
 ```
 
-No model training or labeling was started while implementing this structure.
+No real model inference or probe training was started while implementing this
+structure. Only synthetic dry-run labels were generated to test the workflow.
 
 ## What is adapted from the paper
 
@@ -29,11 +31,14 @@ The nine targets are the paper's two structured families:
   information/guidance, and tangible support.
 
 The label prompts retain the paper's definitions, nesting, key names, and
-explanation fields. They remove only the subsequent `RESPONSE:` request. Qwen is
-therefore an annotation model: it assigns a continuous 0–1 teacher score to the
-conversation, but its advice is neither generated nor used.
+explanation fields. They remove only the subsequent `RESPONSE:` request. The
+pinned Qwen3.6-35B-A3B and Gemma-3-27B GGUFs are annotation teachers: each
+independently assigns a continuous 0–1 score to every conversation and
+instrument, but their advice is neither generated nor used. Both raw scores and
+rationales remain auditable. The training label is their arithmetic mean; with
+exactly two teachers this is also their median.
 
-The target model never sees the Qwen annotation prompt. Its activations are
+The later target model never sees either annotation prompt. Its activations are
 extracted from exactly the same direct persona chat and forced-choice question
 used later for steering:
 
@@ -86,10 +91,11 @@ The default is a balanced sparse crossing:
 - original and flipped framings for every selected person/dilemma/facet;
 - one no-persona control for every selected dilemma/framing.
 
-That produces 17,040 framing-specific cells and 34,080 Qwen calls because the
-two paper instruments are administered separately. A 60×120 full Cartesian
-cross would spend most of the budget relabeling repeated content. Set
-`design.pairing: fully_crossed` only when that density is needed.
+That produces 17,040 framing-specific cells, 34,080 calls per teacher, and
+68,160 calls total because the two paper instruments are administered
+separately by both teachers. A 60×120 full Cartesian cross would spend most of
+the budget relabeling repeated content. Set `design.pairing: fully_crossed` only
+when that density is needed.
 
 Splits are frozen before labeling. The default `two_axis` split assigns every
 facet of one `persona_id` together and both framings of one `prompt_id`
@@ -108,7 +114,8 @@ partition.
 The exact counts are printed by `linear-probe plan` and stored in the dataset
 manifest. Setting `design.include_cross_axis: true` switches to global sparse
 pairing and retains named cross partitions, but the current primary probe fit
-does not consume them. The production snapshot has not been materialized.
+does not consume them. The production dataset snapshot has been frozen; no
+production label completions have been generated.
 
 The selected rows from the demographic/vulnerability CSV are frozen as a
 separate artifact keyed by `persona_id`. They are not used in probe selection
@@ -132,21 +139,27 @@ so it is quarantined after one attempt instead of paying to regenerate the same
 invalid text. Only a complete, strictly valid completion enters
 `labels.parquet` as usable supervision.
 
-The shipped configuration pins the exact Qwen GGUF filename, repository
-commit, content SHA-256, and tokenizer commit. Every raw row carries the
-resulting provenance digest, and parsing rejects mixed weights, tokenizers,
-configurations, task identities, or prompt digests. An unterminated crash
-fragment is preserved in `*.truncated` before appending resumes.
+The shipped configuration separately pins the exact Qwen and Gemma GGUF
+filenames, repository commits, content SHA-256 values, and tokenizer commits.
+Teacher identity is part of every task key and filename. Every raw row carries
+its teacher's provenance digest, and parsing rejects missing teachers or mixed
+weights, tokenizers, configurations, task identities, and prompt digests. An
+unterminated crash fragment is preserved in `*.truncated` before appending
+resumes.
 
-Qwen labels are teacher judgments, not ground truth. Before the full run, the
-recommended audit is:
+Ensemble labels remain teacher judgments, not ground truth. Two teachers can
+expose disagreement but do not constitute a majority vote. `quality.json`
+reports pairwise mean/median absolute differences, Pearson correlation, and the
+fraction differing by more than .2 for each dimension. Before the full run:
 
-1. Benchmark 100–200 cells on the actual L40-class node.
-2. Inspect parse failures and score distributions by dimension/facet/framing.
+1. Benchmark 100–200 calls from **each** teacher on actual L40-class nodes.
+2. Inspect parse failures, score distributions, and teacher disagreement by
+   dimension/facet/framing. Gemma previously emitted markdown fences under a
+   different prompt, so bare-JSON compliance must be verified before scaling.
 3. Human-review a stratified 200–300-cell sample, ideally with two reviewers.
 4. Compare a smaller thinking-on/off and replicate-label sample.
-5. Verify the shipped Qwen revision/hash is the intended artifact before the
-   confirmatory labels.
+5. Verify both shipped revisions/hashes are the intended artifacts before the
+   production labels.
 
 Rare support dimensions may have little variation in AITA-style dilemmas. A
 probe is blocked from steering unless validation R², label standard deviation,
@@ -155,14 +168,25 @@ gates.
 
 ## Target representations and steering
 
-The initial target is the HF/PyTorch form of Llama-3.1-8B in BF16. The enabled
-GGUF alias cannot expose residual activations or accept PyTorch hooks. Historical
-GGUF sycophancy scores also cannot be used as alpha zero: the baseline must come
-from the same HF checkpoint, prompt renderer, tokenizer, precision, and option
-scorer as the intervention.
+The target is intentionally unselected in the shipped configuration. Labeling
+does not need it, and selecting a target later does not invalidate the frozen
+data or teacher labels. Before extraction, set and pin `target.model`,
+`target.hf_ref`, `target.revision`, precision, and quantization. Set
+`target.tokenizer_ref` only when it differs from the model repository.
+Keep `output_dir` unchanged: target-specific stage IDs allow multiple targets
+under the same root while reusing the teacher artifacts.
 
-For Llama's 32 blocks, the preregistered candidates are zero-based blocks
-`[3, 7, 11, 15, 19, 23, 27, 31]`.
+The target must be a hook-compatible Hugging Face text-generation model. The
+resolver supports Llama/Mistral/Qwen-style decoder stacks, Gemma-3 conditional
+wrappers, GPT-style stacks, and a unique `.layers`/`.h` fallback. It is not a
+claim that every arbitrary model works: a tokenizer-only prompt smoke test and
+one-batch extraction/hook identity test are required for the chosen checkpoint.
+GGUF cannot expose residual activations or accept PyTorch hooks.
+
+The eight candidate positions are architecture-relative fractions
+`[.125, .25, .375, .5, .625, .75, .875, 1.0]`. After loading, they resolve to
+exact zero-based decoder-block indices and those same modules are used for
+extraction and steering. This avoids assuming a 32-layer Llama architecture.
 
 The primary pooling mode is `final_user_mean`. Long persona histories contain
 many early token states that cannot see the later dilemma, so a full-context
@@ -195,15 +219,16 @@ but are excluded from the primary persona-conditioned effect estimate.
 
 | Decision | Current implementation/default | Consequence |
 |---|---|---|
-| Qwen identity | `Qwen3.6-35B-A3B`, pinned GGUF Q4, thinking off, T=0 | Confirm the pinned 35B-total/3B-active MoE artifact is the intended teacher before the audit. |
+| Teachers | Pinned Qwen3.6-35B-A3B and Gemma-3-27B GGUF Q4, thinking off, T=0 | Both independently label every instrument. Confirm bare-JSON compliance and both artifact pins in the pilot. |
+| Teacher aggregation | Arithmetic mean of two scores | Equals the two-value median. Preserve and inspect disagreement; this is not a majority vote or ground truth. |
 | Label schemas | Two separate paper-family calls | Scientifically cleaner; doubles prefills versus an unvalidated combined nine-score schema. |
-| Replicate labels | One | Cheapest. Use 2–3 on an audit subset to estimate teacher reliability. |
+| Replicate labels | One call per teacher | Gives two independent model judgments. Use repeated calls only on an audit subset to estimate within-teacher stability. |
 | Rationales | Retained for audit, scores alone train Ridge | More output tokens, but makes human error analysis possible. |
-| Target | Pinned Llama-3.1-8B HF revision, BF16 | Changing precision/checkpoint requires new activations, probes, and alpha-zero baseline. |
+| Target | Unselected | Choose and pin it before extraction. Changing target or precision creates new activations, probes, and alpha-zero baseline while reusing labels. |
 | Task | Deterministic constrained Yes/No | Directly measures sycophancy; free text should be a smaller quality follow-up. |
 | Pooling | Final-user mean | Causally appropriate adaptation; run attention-mask mean as the paper-style sensitivity analysis. |
 | Split | Partition axes first, then form sparse pairs within train/validation/test | Both identities and dilemmas are unseen in validation/test without paying for unused cross-axis labels. |
-| Layer set | Eight fixed Llama blocks | Do not tune the grid after viewing test metrics. |
+| Layer set | Eight architecture-relative positions | They resolve to exact blocks after model load. Do not tune the grid after viewing test metrics. |
 | Ridge | alpha 10, no standardization | Paper-compatible. A hyperparameter grid would need nested validation. |
 | Probe gate | validation R² ≥ .05, label SD ≥ .05, ≥25 extremes/class | Low-signal dimensions are not steered by default. |
 | Steering scale | Projection SD | Comparable across dimensions; use unit scale for direct paper-code reproduction. |
@@ -216,7 +241,7 @@ but are excluded from the primary persona-conditioned effect estimate.
 ## Artifacts and lineage
 
 ```text
-results/linear_probe/qwen36_labels_llama31_probe/
+results/linear_probe/qwen_gemma_ensemble_probe/
   dataset/<dataset-stage-id>/
     cells.parquet
     personas.parquet
@@ -224,8 +249,8 @@ results/linear_probe/qwen36_labels_llama31_probe/
     demographics.parquet
     manifest.json
   labels/<labels-stage-id>/
-    raw.jsonl or raw.shard-XXX-of-YYY.jsonl
-    work_manifest.json
+    raw.teacher-<teacher>.shard-XXX-of-YYY.jsonl
+    work_manifest.teacher-<teacher>.json
     labels.parquet
     labels.manifest.json
     quality.json
@@ -265,87 +290,95 @@ Planning and an offline strict-parser smoke test do not load model weights:
 python -m syco linear-probe plan --config config/linear_probe.yaml
 
 python -m syco linear-probe label --config config/linear_probe.yaml \
-  --dry-run --limit 20
+  --dry-run --teacher qwen36_35b_a3b --limit 20
+python -m syco linear-probe label --config config/linear_probe.yaml \
+  --dry-run --teacher gemma3_27b --limit 20
 python -m syco linear-probe parse-labels --config config/linear_probe.yaml \
   --dry-run --allow-partial
 ```
 
 Production should begin by freezing, benchmarking, and auditing—not by running
-all 34,080 calls immediately:
+all 68,160 calls immediately:
 
 ```bash
 python -m syco linear-probe freeze --config config/linear_probe.yaml
-python -m syco linear-probe label --config config/linear_probe.yaml --limit 200
+python -m syco linear-probe label --config config/linear_probe.yaml \
+  --teacher qwen36_35b_a3b --limit 200
+python -m syco linear-probe label --config config/linear_probe.yaml \
+  --teacher gemma3_27b --limit 200
 python -m syco linear-probe parse-labels --config config/linear_probe.yaml \
   --allow-partial
 ```
 
-After accepting the audit, rerun `label` without `--limit`; it resumes. Four
-independent GPUs can use deterministic, non-overlapping files:
+The equivalent Slurm pilot runs one 200-call task per teacher:
 
 ```bash
-python -m syco linear-probe label --num-shards 4 --shard-index 0
-python -m syco linear-probe label --num-shards 4 --shard-index 1
-python -m syco linear-probe label --num-shards 4 --shard-index 2
-python -m syco linear-probe label --num-shards 4 --shard-index 3
+sbatch --array=0,4 --export=ALL,LABEL_PILOT=1,LABEL_LIMIT=200 \
+  slurm/linear_probe_labels.sbatch
 ```
 
-The checked-in Slurm array submits those four fixed shards and safely resumes
-individual indices:
+`LABEL_PILOT=1` makes both teachers use a one-shard queue, so they label the
+same first 200 tasks and produce a meaningful agreement audit. Those task keys
+are recognized as complete when the differently sharded full array starts.
+
+After accepting JSON compliance, label distributions, teacher agreement, and
+human review, submit the full fixed array. Tasks 0–3 are four Qwen shards;
+tasks 4–13 are ten Gemma shards. Each task writes a separate resumable file.
 
 ```bash
 sbatch slurm/linear_probe_labels.sbatch
+# Example: resume only Gemma task 7 without changing its ten-shard assignment.
+sbatch --array=7 slurm/linear_probe_labels.sbatch
 ```
 
 Then, only after label completeness and human review:
 
 ```bash
 python -m syco linear-probe parse-labels
-python -m syco linear-probe extract
-python -m syco linear-probe train
-python -m syco linear-probe steer
-python -m syco linear-probe evaluate
 ```
 
-Use `slurm/linear_probe_target.sbatch` for the one-GPU extraction and steering
-stages. The default steering config is validation-only. After inspecting it,
-freeze the confirmatory dimensions, alphas, and random controls; then change
-only `steering.partition` to `test` and run steering/evaluation exactly once.
+Then select and pin a target checkpoint, validate the plan and one-batch hook
+smoke test, and run `extract`, `train`, `steer`, and `evaluate`. Use
+`slurm/linear_probe_target.sbatch` for the GPU stages. The default steering
+config is validation-only. After inspecting it, freeze the confirmatory
+dimensions, alphas, and random controls; then change only
+`steering.partition` to `test` and run steering/evaluation exactly once.
 
 `linear-probe status` shows which stage artifacts exist.
 
 ## L40-class resource estimate
 
-These are planning ranges, not promised throughput. The labeling range is
-anchored to this project's existing Qwen runs and must be replaced by the
-200-call label-only benchmark.
+These are planning ranges, not promised throughput. Qwen is anchored to the
+project's provisional label-only rate. Gemma's conservative bound comes from
+the existing 8,040-call structured runs, which took 18.05–18.89 seconds per
+call while also generating a subsequent advice response. The new label-only
+prompt should be faster, but scheduling must use the measured two-teacher pilot.
 
 | Stage | Default workload | Expected resource/time |
 |---|---:|---|
 | Freeze/token audit | 17,040 cells | CPU minutes; snapshots are small. |
 | Qwen labels | 34,080 label-only calls | About 30–43 GPU-hours from a provisional 3.2–4.5 s/call; about 66 GPU-hours using the old labels+long-response rate as a conservative upper bound. Add 10–15% operations/retries. |
-| Llama activation extraction | Roughly 17M prompt tokens, eight blocks in one pass | About 1–5 GPU-hours on one L40-class card; benchmark batch size. |
-| Activation storage | 17,040 × 8 × 4,096 float16 | About 1.04 GiB. The loader expands this to roughly 2.1 GiB float32 for Ridge. |
+| Gemma labels | 34,080 label-only calls | Prior labels+reply rate implies 171–179 GPU-hours, or 17.1–17.9 hours ideally across ten shards before operational buffer. Replace this conservative bound with the 200-call pilot. |
+| Target activation extraction | Target-dependent prompt tokens, eight blocks in one pass | Benchmark after choosing the target; the full HF model and architecture determine memory and speed. |
+| Activation storage | `17,040 × 8 × hidden_width × 2` bytes | 1.04 GiB at width 4,096; Ridge loading expands float16 vectors to float32. |
 | Ridge train/select/test | 9 dimensions × 8 blocks | CPU minutes to under one hour; GPU unnecessary. |
-| Default steering calibration | 2,556 framed validation cells (1,278 paired units), 9 dimensions, 2 nonzero strengths | About 97,416 candidate-sequence forwards including baseline and zero-hook checks; provisionally 6–16 GPU-hours. Benchmark before scheduling the confirmatory run. |
+| Steering calibration | 2,556 framed validation cells (1,278 paired units), 9 dimensions, 2 nonzero strengths | About 97,416 candidate-sequence forwards including baseline and zero-hook checks; time is target-dependent. |
 
-Sequentially, budget roughly 37–64 GPU-hours on one 48 GB card, with labeling
-dominating. Four label shards reduce the projected label wall time to roughly
-8–11 hours in the ideal case (about 17 hours at the conservative old-output
-rate). Including one-card extraction and validation steering, provisional
-end-to-end wall time is roughly 15–32 hours. A literal L40 and an L40S both have
-48 GB memory, but their BF16 throughput differs; replace these ranges with
-measurements from the actual allocated card.
+Before pilot replacement, the two teachers imply roughly 201–222 GPU-hours
+using provisional Qwen plus conservative Gemma rates, before a 10–15%
+operations/retry buffer. The Slurm array limits concurrency to eight jobs:
+Qwen has four shards and Gemma ten, so ideal no-queue wall time is approximately
+two Gemma waves. This is substantially more expensive than a Qwen-only design.
 
-The default Llama BF16 checkpoint needs about 16–17 GB of VRAM and disk. One
-48 GB L40-class GPU is enough for extraction and steering at batch size 8. The
-Qwen Q4 GGUF is already approximately 21 GB and fits one card. Expect roughly
-20–22 GB of additional disk for the Llama checkpoint and all first-study
-artifacts. Recheck free disk before downloading it.
+Both teacher weights are already cached: approximately 22.1 GB for Qwen and
+16.5 GB for Gemma. No full HF target weights should be downloaded until the
+target decision is made. A literal L40 and an L40S both have 48 GB memory, but
+their BF16 throughput differs; benchmark the actual allocation.
 
 Do not persist token-level hidden states: at this scale they approach a
-terabyte. Larger 27B targets generally need a pinned HF quantization or multiple
-GPUs; their probes and baselines cannot reuse Llama's activation artifacts.
+terabyte. Larger targets may need a pinned HF quantization or multiple GPUs;
+activations, probes, and baselines cannot be reused across target checkpoints or
+precision choices.
 
 Official hardware references: [NVIDIA L40 datasheet](https://images.nvidia.com/content/Solutions/data-center/vgpu-L40-datasheet.pdf)
 and [NVIDIA L40S specifications](https://www.nvidia.com/en-gb/data-center/l40s/).

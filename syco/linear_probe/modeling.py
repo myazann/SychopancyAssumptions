@@ -107,9 +107,20 @@ def _dtype(torch, name: str):
     return values[normalized]
 
 
+def _require_target_selected(target) -> None:
+    if (not target.hf_ref or not target.revision
+            or target.model == "UNSELECTED"):
+        raise RuntimeError(
+            "probe target is unselected; set target.model, target.hf_ref, "
+            "and a pinned target.revision before extraction (tokenizer_ref may "
+            "be omitted when it is the same repository)"
+        )
+
+
 def load_tokenizer(target):
     from transformers import AutoTokenizer
 
+    _require_target_selected(target)
     tokenizer = AutoTokenizer.from_pretrained(
         target.tokenizer_ref or target.hf_ref,
         revision=target.revision,
@@ -129,6 +140,7 @@ def load_target_model(target):
     import torch
     from transformers import AutoConfig, AutoModelForCausalLM
 
+    _require_target_selected(target)
     config = AutoConfig.from_pretrained(
         target.hf_ref,
         revision=target.revision,
@@ -162,11 +174,27 @@ def load_target_model(target):
             )
         else:
             kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+    architectures = list(getattr(config, "architectures", []) or [])
+    conditional_wrapper = any(
+        "ForConditionalGeneration" in architecture
+        and "ForCausalLM" not in architecture
+        for architecture in architectures
+    )
+    model_loader = AutoModelForCausalLM
+    if conditional_wrapper:
+        try:
+            from transformers import AutoModelForImageTextToText
+        except ImportError as exc:
+            raise RuntimeError(
+                f"target architectures {architectures} require a conditional "
+                "text-generation auto class unavailable in this Transformers build"
+            ) from exc
+        model_loader = AutoModelForImageTextToText
     try:
-        model = AutoModelForCausalLM.from_pretrained(target.hf_ref, **kwargs)
+        model = model_loader.from_pretrained(target.hf_ref, **kwargs)
     except TypeError:
         kwargs["torch_dtype"] = kwargs.pop("dtype")
-        model = AutoModelForCausalLM.from_pretrained(target.hf_ref, **kwargs)
+        model = model_loader.from_pretrained(target.hf_ref, **kwargs)
     model.eval()
     return model
 

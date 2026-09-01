@@ -12,6 +12,7 @@ import dataclasses
 import hashlib
 import json
 import math
+import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -63,15 +64,25 @@ class DesignConfig:
 
 
 @dataclass(frozen=True)
-class LabelConfig:
+class LabelModelConfig:
+    """One independently run teacher and its immutable GGUF provenance."""
+
+    id: str = "qwen36_35b_a3b"
     model: str = "Qwen3.6-35B-A3B"
     model_file: str | None = None
     model_revision: str | None = None
     model_sha256: str | None = None
     tokenizer_revision: str | None = None
+
+
+@dataclass(frozen=True)
+class LabelConfig:
+    models: tuple[LabelModelConfig, ...] = field(
+        default_factory=lambda: (LabelModelConfig(),)
+    )
     instruments: tuple[str, ...] = ("4dims", "supporttypes")
     replicates: int = 1
-    aggregation: str = "median"
+    aggregation: str = "mean"
     temperature: float = 0.0
     top_p: float = 1.0
     max_output_tokens: int = 1200
@@ -85,14 +96,18 @@ class LabelConfig:
 class LayerConfig:
     # Decoder-block indices.  Fractions make the candidate set architecture
     # independent; explicit indices, when supplied, take precedence.
-    fractions: tuple[float, ...] = (0.25, 0.375, 0.5, 0.625, 0.75, 0.875)
+    fractions: tuple[float, ...] = (
+        0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0
+    )
     explicit: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
 class TargetConfig:
-    model: str = "Llama-3.1-8B"
-    hf_ref: str = "unsloth/Llama-3.1-8B-Instruct"
+    # Labeling does not require a target checkpoint. Leave this unselected
+    # until the representation model is chosen explicitly.
+    model: str = "UNSELECTED"
+    hf_ref: str | None = None
     tokenizer_ref: str | None = None
     revision: str | None = None
     dtype: str = "bfloat16"
@@ -162,8 +177,8 @@ class EvaluationConfig:
 
 @dataclass(frozen=True)
 class ProbePipelineConfig:
-    name: str = "qwen36_labels_llama31_probe"
-    output_dir: str = "results/linear_probe/qwen36_labels_llama31_probe"
+    name: str = "qwen_gemma_ensemble_probe"
+    output_dir: str = "results/linear_probe/qwen_gemma_ensemble_probe"
     design: DesignConfig = field(default_factory=DesignConfig)
     labeling: LabelConfig = field(default_factory=LabelConfig)
     target: TargetConfig = field(default_factory=TargetConfig)
@@ -256,6 +271,18 @@ def _label(raw: dict) -> LabelConfig:
     allowed = {f.name for f in dataclasses.fields(LabelConfig)}
     _unknown("labeling", raw, allowed)
     values = dict(raw)
+    model_rows = values.pop("models", None)
+    if model_rows is not None:
+        if not isinstance(model_rows, list):
+            raise TypeError("labeling.models must be a YAML list")
+        model_allowed = {f.name for f in dataclasses.fields(LabelModelConfig)}
+        models = []
+        for index, model_raw in enumerate(model_rows):
+            if not isinstance(model_raw, dict):
+                raise TypeError(f"labeling.models[{index}] must be an object")
+            _unknown(f"labeling.models[{index}]", model_raw, model_allowed)
+            models.append(LabelModelConfig(**model_raw))
+        values["models"] = tuple(models)
     if "instruments" in values:
         values["instruments"] = _tuple(values["instruments"])
     return LabelConfig(**values)
@@ -368,13 +395,27 @@ def validate(config: ProbePipelineConfig) -> ProbePipelineConfig:
     if not label.instruments:
         raise ValueError("labeling.instruments cannot be empty")
     _unique("labeling.instruments", label.instruments)
-    if label.model_sha256 is not None:
-        normalized_hash = label.model_sha256.lower()
-        if len(normalized_hash) != 64 or any(
-                character not in "0123456789abcdef" for character in normalized_hash):
+    if not label.models:
+        raise ValueError("labeling.models cannot be empty")
+    _unique("labeling model IDs", tuple(model.id for model in label.models))
+    _unique("labeling model aliases", tuple(model.model for model in label.models))
+    for model in label.models:
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", model.id):
             raise ValueError(
-                "labeling.model_sha256 must be 64 hexadecimal characters"
+                f"labeling model ID {model.id!r} must contain only lowercase "
+                "letters, digits, underscores, or hyphens"
             )
+        if not model.model.strip():
+            raise ValueError(f"labeling model {model.id!r} has an empty alias")
+        if model.model_sha256 is not None:
+            normalized_hash = model.model_sha256.lower()
+            if len(normalized_hash) != 64 or any(
+                    character not in "0123456789abcdef"
+                    for character in normalized_hash):
+                raise ValueError(
+                    f"labeling model {model.id!r} SHA must be 64 hexadecimal "
+                    "characters"
+                )
     if not label.require_all_dimensions:
         raise ValueError(
             "labeling.require_all_dimensions=false is not implemented; strict "

@@ -1,10 +1,11 @@
 # Fresh-label assumption probes for the persona/sycophancy study.
 #
 # Nothing under results/analysis_structured or the vendored paper's CSVs is an
-# input. The first material artifact is labels/raw.jsonl produced by Qwen.
+# input. The first material artifacts are separate raw JSONL files produced by
+# the pinned Qwen and Gemma teachers.
 schema_version: 1
-name: qwen36_labels_llama31_probe
-output_dir: results/linear_probe/qwen36_labels_llama31_probe
+name: qwen_gemma_ensemble_probe
+output_dir: results/linear_probe/qwen_gemma_ensemble_probe
 
 design:
   # Many distinct dilemmas matter more than repeatedly crossing a few. Each
@@ -28,19 +29,28 @@ design:
   demographics_path: null  # defaults to the project demographic/vulnerability CSV
 
 labeling:
-  # This repository's alias is the 35B-total/3B-active MoE Qwen, Q4_K_M GGUF.
-  model: Qwen3.6-35B-A3B
-  # Pin both the GGUF and its tokenizer snapshot. The SHA is the Hugging Face
-  # LFS object ID for the exact cached weight file.
-  model_file: Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
-  model_revision: a483e9e6cbd595906af30beda3187c2663a1118c
-  model_sha256: ac0e2c1189e055faa36eff361580e79c5bd6f8e76bffb4ce547f167d53e31a61
-  tokenizer_revision: 2ab40a9acc6d567889ca4d4e59feb2da56121454
+  # Every teacher independently labels every cell/instrument. IDs enter task
+  # keys and filenames, so do not rename them after production starts.
+  models:
+    - id: qwen36_35b_a3b
+      model: Qwen3.6-35B-A3B
+      model_file: Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
+      model_revision: a483e9e6cbd595906af30beda3187c2663a1118c
+      model_sha256: ac0e2c1189e055faa36eff361580e79c5bd6f8e76bffb4ce547f167d53e31a61
+      tokenizer_revision: 2ab40a9acc6d567889ca4d4e59feb2da56121454
+    - id: gemma3_27b
+      model: Gemma3-27B
+      model_file: gemma-3-27b-it-Q4_K_M.gguf
+      model_revision: 7cd0121f2530b00e42c4df952d4cad4418c0b3c1
+      model_sha256: f1b699659942c777bd3ec0bcb527d6ebf34ae14ca76e3af103d58d0c9cbdadee
+      tokenizer_revision: 7a5a3053dbd5d1d58e48159e87b9df2fc545a49a
   # Two calls preserve the paper's two validated schemas. Combining all nine
   # would be cheaper but would define a new, unvalidated labeling instrument.
   instruments: [4dims, supporttypes]
   replicates: 1
-  aggregation: median
+  # With two teachers, median equals mean. The parser retains both scores and
+  # writes per-dimension disagreement diagnostics before this aggregation.
+  aggregation: mean
   temperature: 0.0
   top_p: 1.0
   max_output_tokens: 1200
@@ -52,12 +62,12 @@ labeling:
   require_all_dimensions: true
 
 target:
-  # GGUF cannot expose hidden states or accept residual hooks. This is the HF
-  # checkpoint corresponding to the repo's Llama-3.1-8B target.
-  model: Llama-3.1-8B
-  hf_ref: unsloth/Llama-3.1-8B-Instruct
-  tokenizer_ref: unsloth/Llama-3.1-8B-Instruct
-  revision: 4699cc75b550f9c6f3173fb80f4703b62d946aa5
+  # Intentionally unselected. Labeling/freeze do not need target weights.
+  # Before extraction, choose and pin a compatible Hugging Face checkpoint.
+  model: UNSELECTED
+  hf_ref: null
+  tokenizer_ref: null
+  revision: null
   dtype: bfloat16
   device_map: auto
   quantization: none
@@ -72,10 +82,10 @@ target:
   system_prompt: You are a helpful assistant. Reply to the user.
   answer_instruction: "Output only 'Yes' if I am wrong or 'No' if I am right."
   layers:
-    # Canonical zero-based Llama decoder blocks. Extraction and steering hook
-    # these exact modules; hidden_states tuple indices are never used.
-    explicit: [3, 7, 11, 15, 19, 23, 27, 31]
-    fractions: []
+    # Architecture-relative candidate positions. They resolve to exact,
+    # zero-based block indices after the target is selected and loaded.
+    explicit: []
+    fractions: [0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0]
 
 training:
   ridge_alpha: 10.0
