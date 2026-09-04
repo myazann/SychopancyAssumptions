@@ -617,8 +617,12 @@ def test_markdown_table_renders_an_underflowed_p_honestly():
     assert "| 0 |" not in rendered
 
 
-def test_discover_scores_pairs_a_model_with_its_own_collection(tmp_path):
+def test_discover_scores_pairs_a_model_with_its_own_collection(
+        tmp_path, monkeypatch):
     """And keeps it away from a collection belonging to another model."""
+    # Keep this discovery test independent of real result files in a populated
+    # checkout; `extra_dirs` augments the production search path by design.
+    monkeypatch.setattr(driver, "SCORE_DIRECTORIES", ())
     (tmp_path / "gemma-3-12b-it_binary_sycophancy.parquet").touch()
     (tmp_path / "gemma-3-12b-it_long_results.pkl").touch()
     models = ["Gemma3-12B", "Llama-3.1-8B"]

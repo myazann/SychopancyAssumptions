@@ -114,6 +114,7 @@ def test_structured_profile_uses_probe_specific_paths_and_arguments(tmp_path):
     assert profile.parsed_output_for(spec).name == "4dims_structured.parquet"
     args = profile.run_args(spec)
     assert args[args.index("--probe") + 1] == "4dims"
+    assert args[args.index("--four-dims-prompt-version") + 1] == "explicit-0-1-v2"
     assert "--n-models" not in args
 
 

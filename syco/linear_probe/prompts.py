@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from syco.data import transcript_to_text
 from syco.models import build_messages
-from syco.prompts import build_prompt_4dims, build_prompt_supporttypes
+from syco.prompts import (
+    FOUR_DIMS_PROMPT_EXPLICIT_V2,
+    build_prompt_4dims,
+    build_prompt_supporttypes,
+)
 
 _RESPONSE_INSTRUCTION = (
     "\n\nThen, on a new line, write your actual reply to User A under the heading:\n\n"
@@ -12,16 +16,25 @@ _RESPONSE_INSTRUCTION = (
 )
 
 
-def build_label_prompt(instrument: str, persona_messages, post_text: str) -> str:
+def build_label_prompt(
+    instrument: str,
+    persona_messages,
+    post_text: str,
+    *,
+    four_dims_prompt_version: str = FOUR_DIMS_PROMPT_EXPLICIT_V2,
+) -> str:
     """Paper structured instrument with only its annotation portion.
 
-    The dimension definitions and JSON schema stay byte-for-byte identical to
-    Cheng et al.  Removing the reply request isolates Qwen's role as a labeller
-    and prevents its advice text from becoming accidental supervision.
+    Removing the reply request isolates the teacher as a labeller and prevents
+    its advice text from becoming accidental supervision. New 4dims datasets
+    use the explicit 0-1 prompt; callers can request paper-v1 only to reproduce
+    an already-frozen dataset.
     """
     history = transcript_to_text(list(persona_messages))
     if instrument == "4dims":
-        full = build_prompt_4dims(history, post_text)
+        full = build_prompt_4dims(
+            history, post_text, prompt_version=four_dims_prompt_version
+        )
     elif instrument == "supporttypes":
         full = build_prompt_supporttypes(history, post_text)
     else:

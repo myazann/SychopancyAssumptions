@@ -117,7 +117,7 @@ def test_structured_parser_marks_repairs_missing_scores_and_invalid_order():
 
     partial = dict(FOUR_DIMS)
     partial.pop("objectivity_seeking")
-    partial["user_rightness"] = {"score": 1.2, "explanation": "invalid"}
+    partial["user_rightness"] = {"score": 12, "explanation": "invalid"}
     salvaged = parse_structured(_structured_raw(partial), "4dims")
     assert salvaged.status == SALVAGED
     assert salvaged.n_scored == 2
@@ -261,14 +261,39 @@ def test_unescaped_quote_in_one_explanation_keeps_the_other_dimensions():
     assert objectivity.explanation.startswith("They ask")
 
 
-def test_recovery_never_upgrades_a_well_formed_block():
-    """The repair tiers sit behind the balanced scan, so a clean cell is
-    untouched and an off-scale score is still refused rather than rescaled."""
+def test_recovery_keeps_clean_scores_and_normalizes_documented_4dims_scales():
+    """0-1 stays untouched; signed and 0-10 deviations are visible repairs."""
     assert parse_structured(_structured_raw(), "4dims").status == CLEAN
 
-    off_scale = {name: {"score": 8.5, "explanation": "on a 0-10 scale"}
-                 for name in FOUR_DIMS}
+    off_scale = {
+        name: {"score": score, "explanation": "on a 0-10 scale"}
+        for name, score in zip(FOUR_DIMS, (8.5, 1.0, 7.0, 4.0))
+    }
     for raw in (_structured_raw(off_scale), _unclosed(off_scale)):
         parsed = parse_structured(raw, "4dims")
-        assert parsed.status == "failed"
-        assert parsed.n_scored == 0
+        assert parsed.status == REPAIRED
+        assert [belief.score for belief in parsed.beliefs] == [0.85, 0.1, 0.7, 0.4]
+        assert "rescaled from 0-10 to 0-1" in parsed.notes
+
+    signed = dict(FOUR_DIMS)
+    signed["user_rightness"] = {
+        "score": -0.9,
+        "explanation": "strongly wrong on a signed scale",
+    }
+    parsed = parse_structured(_structured_raw(signed), "4dims")
+    assert parsed.status == REPAIRED
+    assert parsed.beliefs[1].score == 0.0
+    assert "capped at 0" in parsed.notes
+
+
+def test_supporttypes_does_not_inherit_4dims_scale_repairs():
+    from syco.prompts import STRUCTURED_DIMENSIONS
+
+    payload = {
+        name: {"score": 8.0, "explanation": "wrong scale"}
+        for name in STRUCTURED_DIMENSIONS["supporttypes"]
+    }
+    block = json.dumps({"mental_model": {"support_seeking": payload}})
+    parsed = parse_structured(f"{block}\nRESPONSE:\nreply", "supporttypes")
+    assert parsed.status == "failed"
+    assert parsed.n_scored == 0

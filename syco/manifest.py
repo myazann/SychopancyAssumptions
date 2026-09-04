@@ -181,6 +181,11 @@ def build_manifest(
             "dimensions": list(probe.dimensions),
             "system": args.system,
             "thinking": bool(args.thinking),
+            "prompt_version": (
+                getattr(args, "four_dims_prompt_version", None)
+                if probe.kind == "4dims"
+                else None
+            ),
         },
         "design": design,
         "data": {
@@ -253,7 +258,15 @@ COMPARED_FIELDS = {
         "top_p",
         "max_output_tokens",
     ),
-    "instrument": ("probe", "family", "n_models", "dimensions", "system", "thinking"),
+    "instrument": (
+        "probe",
+        "family",
+        "n_models",
+        "dimensions",
+        "system",
+        "thinking",
+        "prompt_version",
+    ),
     "data": ("personas_sha256", "prompts_sha256"),
     "design": DESIGN_INVARIANTS,
 }

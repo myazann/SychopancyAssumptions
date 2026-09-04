@@ -18,8 +18,9 @@ freeze paired design and splits
     -> fixed-denominator sycophancy effects
 ```
 
-No real model inference or probe training was started while implementing this
-structure. Only synthetic dry-run labels were generated to test the workflow.
+The 200-call production pilot for each annotation teacher has completed. Probe
+training and target-model inference have not started because the target
+checkpoint is intentionally still unselected.
 
 ## What is adapted from the paper
 
@@ -114,8 +115,8 @@ partition.
 The exact counts are printed by `linear-probe plan` and stored in the dataset
 manifest. Setting `design.include_cross_axis: true` switches to global sparse
 pairing and retains named cross partitions, but the current primary probe fit
-does not consume them. The production dataset snapshot has been frozen; no
-production label completions have been generated.
+does not consume them. The production dataset snapshot has been frozen; its
+pilot completions remain reusable after format-only parser improvements.
 
 The selected rows from the demographic/vulnerability CSV are frozen as a
 separate artifact keyed by `persona_id`. They are not used in probe selection
@@ -127,11 +128,18 @@ independent people.
 
 ## Label integrity
 
-Every completion must be a bare JSON object with exactly the expected nesting,
-dimensions, and `{score, explanation}` fields. Scores must be finite JSON
-numbers in `[0,1]`. The parser does not accept strings, percentages, `NaN`,
-extra fields, missing fields, markdown fences, repaired JSON, clipping, or
-scale conversion. Duplicate keys and empty explanations are also invalid.
+Every completion must contain exactly one JSON object with the expected
+nesting, dimensions, and `{score, explanation}` fields. A single Markdown JSON
+fence is removed after generation because Gemma emits that presentation wrapper
+consistently; prose outside that one fence is ignored. The extracted payload
+remains strict: scores must be finite JSON numbers in `[0,1]`, and strings,
+percentages, `NaN`, extra or missing fields, repaired JSON, clipping, and scale
+conversion are rejected. Duplicate keys and empty explanations are also
+invalid.
+
+Newly frozen 4dims datasets use an explicit 0-1 instruction. The current frozen
+production dataset retains its recorded paper-v1 prompt digests, and labeling
+automatically reproduces those legacy bytes rather than mixing prompt versions.
 
 Raw attempts are never discarded. Runtime/provider failures are retried up to
 three times. A schema-invalid completion at temperature zero is deterministic,
@@ -219,7 +227,7 @@ but are excluded from the primary persona-conditioned effect estimate.
 
 | Decision | Current implementation/default | Consequence |
 |---|---|---|
-| Teachers | Pinned Qwen3.6-35B-A3B and Gemma-3-27B GGUF Q4, thinking off, T=0 | Both independently label every instrument. Confirm bare-JSON compliance and both artifact pins in the pilot. |
+| Teachers | Pinned Qwen3.6-35B-A3B and Gemma-3-27B GGUF Q4, thinking off, T=0 | Both independently label every instrument. The pilots confirm strict-schema compliance after removing Gemma's single presentation fence; retain both artifact pins. |
 | Teacher aggregation | Arithmetic mean of two scores | Equals the two-value median. Preserve and inspect disagreement; this is not a majority vote or ground truth. |
 | Label schemas | Two separate paper-family calls | Scientifically cleaner; doubles prefills versus an unvalidated combined nine-score schema. |
 | Replicate labels | One call per teacher | Gives two independent model judgments. Use repeated calls only on an audit subset to estimate within-teacher stability. |

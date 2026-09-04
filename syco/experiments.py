@@ -9,7 +9,12 @@ import yaml
 
 from syco import paths
 from syco.model_registry import ModelRegistry, ModelSpec, load_registry
-from syco.prompts import PROBE_KINDS, ProbeSpec
+from syco.prompts import (
+    FOUR_DIMS_PROMPT_EXPLICIT_V2,
+    FOUR_DIMS_PROMPT_VERSIONS,
+    PROBE_KINDS,
+    ProbeSpec,
+)
 
 EXPERIMENTS_DIR = paths.CONFIG_DIR / "experiments"
 
@@ -162,6 +167,11 @@ class ExperimentProfile:
         ]
         if self.probe_spec.family == "open-ended":
             args.extend(("--n-models", str(self.probe_spec.n_models)))
+        if self.probe_spec.kind == "4dims":
+            args.extend((
+                "--four-dims-prompt-version",
+                str(self.probe.get("prompt_version") or FOUR_DIMS_PROMPT_EXPLICIT_V2),
+            ))
         for extension_base in self.extension_bases_for(spec):
             args.extend(("--extend-from", str(extension_base)))
         if self.design_path is not None:
@@ -248,6 +258,15 @@ def load_profile(name_or_path: str = "default") -> ExperimentProfile:
         raise ValueError("profile probe.kind must be one of: " + ", ".join(PROBE_KINDS))
     if probe.get("kind", "openended") == "openended":
         _positive("probe.n_models", probe.get("n_models", 3))
+    prompt_version = probe.get("prompt_version")
+    if prompt_version is not None:
+        if probe.get("kind", "openended") != "4dims":
+            raise ValueError("probe.prompt_version applies only to the 4dims probe")
+        if prompt_version not in FOUR_DIMS_PROMPT_VERSIONS:
+            raise ValueError(
+                "probe.prompt_version must be one of: "
+                + ", ".join(FOUR_DIMS_PROMPT_VERSIONS)
+            )
     _positive("design.n_personas", design.get("n_personas"), allow_none=True)
     _positive("design.n_prompts", design.get("n_prompts"), allow_none=True)
     _positive("design.n_reps", design.get("n_reps", 1))

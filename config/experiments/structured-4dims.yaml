@@ -11,6 +11,9 @@ models:
 probe:
   # Validation seeking, user rightness, user information advantage, objectivity.
   kind: 4dims
+  # Preserve the exact prompt bytes already recorded in this completed base.
+  # New 4dims profiles default to explicit-0-1-v2.
+  prompt_version: paper-v1
   system: ""
   thinking: false
 

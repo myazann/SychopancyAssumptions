@@ -101,8 +101,19 @@ def fmt_duration(seconds) -> str:
     return f"{h}h{m:02d}m" if h else (f"{m}m{s:02d}s" if m else f"{s}s")
 
 
-def build_conversation(cell, spec_probe, system: str) -> Conversation:
-    messages = probe_prompts.build(spec_probe, cell.persona.messages, cell.prompt.text)
+def build_conversation(
+    cell,
+    spec_probe,
+    system: str,
+    *,
+    four_dims_prompt_version: str = probe_prompts.FOUR_DIMS_PROMPT_EXPLICIT_V2,
+) -> Conversation:
+    messages = probe_prompts.build(
+        spec_probe,
+        cell.persona.messages,
+        cell.prompt.text,
+        four_dims_prompt_version=four_dims_prompt_version,
+    )
     return Conversation(messages=tuple(messages), system=system)
 
 
@@ -217,6 +228,12 @@ def parse_args(argv=None):
         "--system",
         default="",
         help="system prompt, applied to every cell (default: none)",
+    )
+    g.add_argument(
+        "--four-dims-prompt-version",
+        choices=probe_prompts.FOUR_DIMS_PROMPT_VERSIONS,
+        default=probe_prompts.FOUR_DIMS_PROMPT_EXPLICIT_V2,
+        help="4dims prompt wording; paper-v1 exists only to resume legacy runs",
     )
 
     g = p.add_argument_group("design")
@@ -374,7 +391,16 @@ def configured_spec(args, registry, *, resolve_quant: bool = False):
     return spec
 
 
-def verify_prompt_digests(rows, personas, prompts, spec_probe, system, *, limit=None):
+def verify_prompt_digests(
+    rows,
+    personas,
+    prompts,
+    spec_probe,
+    system,
+    *,
+    four_dims_prompt_version=probe_prompts.FOUR_DIMS_PROMPT_EXPLICIT_V2,
+    limit=None,
+):
     """Prove that current prompt construction still reproduces stored prompts.
 
     This is the check that makes a long, interrupted study safe to continue.
@@ -420,7 +446,12 @@ def verify_prompt_digests(rows, personas, prompts, spec_probe, system, *, limit=
             raise RuntimeError(
                 f"a prior coordinate is absent from current source data: {err}"
             ) from err
-        current = build_conversation(cell, spec_probe, system).digest()
+        current = build_conversation(
+            cell,
+            spec_probe,
+            system,
+            four_dims_prompt_version=four_dims_prompt_version,
+        ).digest()
         if current != stored:
             mismatches.append(row.get("cell_key") or str(prompt_key))
             if len(mismatches) >= 5:
@@ -511,7 +542,13 @@ def check_resumable(out, cells, run_id, personas, prompts, spec_probe, args) -> 
             f"{out} holds {len(foreign)} row(s) from another run; refusing to append"
         )
     verify_prompt_digests(
-        rows, personas, prompts, spec_probe, args.system, limit=RESUME_DIGEST_SAMPLE
+        rows,
+        personas,
+        prompts,
+        spec_probe,
+        args.system,
+        four_dims_prompt_version=args.four_dims_prompt_version,
+        limit=RESUME_DIGEST_SAMPLE,
     )
 
 
@@ -708,7 +745,12 @@ def main(argv=None) -> int:
         # Every prior wave, not a sample: the shards are the thing this run is
         # being joined to, so a prompt change anywhere in them matters.
         verify_prompt_digests(
-            extension_plan.base_rows, personas, dilemmas, spec_probe, args.system
+            extension_plan.base_rows,
+            personas,
+            dilemmas,
+            spec_probe,
+            args.system,
+            four_dims_prompt_version=args.four_dims_prompt_version,
         )
 
     output_path = Path(out)
@@ -837,7 +879,12 @@ def main(argv=None) -> int:
             """-> (record). Never raises: a failed cell is a row with an error,
             so the run continues and that cell is retried next time."""
             key = grid.cell_key(spec.alias, spec_probe.label(), cell, run_id)
-            conv = build_conversation(cell, spec_probe, args.system)
+            conv = build_conversation(
+                cell,
+                spec_probe,
+                args.system,
+                four_dims_prompt_version=args.four_dims_prompt_version,
+            )
             try:
                 raw = adapter.chat(conv, n=1, plan=plan)[0]
                 return make_record(
@@ -891,7 +938,15 @@ def main(argv=None) -> int:
                     grid.cell_key(spec.alias, spec_probe.label(), c, run_id)
                     for c in chunk
                 ]
-                convs = [build_conversation(c, spec_probe, args.system) for c in chunk]
+                convs = [
+                    build_conversation(
+                        c,
+                        spec_probe,
+                        args.system,
+                        four_dims_prompt_version=args.four_dims_prompt_version,
+                    )
+                    for c in chunk
+                ]
                 try:
                     raws = adapter.chat_batch(convs, plan=plan)
                     err = ""

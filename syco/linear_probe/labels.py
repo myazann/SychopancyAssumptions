@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import random
+import re
 from collections import Counter, deque
 from dataclasses import replace
 from pathlib import Path
@@ -31,6 +32,10 @@ from syco.linear_probe.prompts import build_label_prompt
 from syco.model_registry import load_registry
 from syco.models import Conversation, build_adapter
 from syco.prompts import STRUCTURED_CONTAINER, STRUCTURED_DIMENSIONS
+from syco.prompts import (
+    FOUR_DIMS_PROMPT_EXPLICIT_V2,
+    FOUR_DIMS_PROMPT_PAPER_V1,
+)
 
 
 class InvalidLabel(ValueError):
@@ -183,7 +188,12 @@ def _select_teacher(labeling, teacher_id: str | None):
 
 
 def strict_parse_label(raw: str, instrument: str) -> list[dict]:
-    """Parse an exact JSON object; never repair, coerce, rescale, or clip."""
+    """Parse an exact JSON object, optionally wrapped in one Markdown fence.
+
+    The fence tolerance is deliberately narrow: it fixes Gemma's consistent
+    presentation wrapper after generation, but still never repairs, coerces,
+    rescales, or clips the label payload itself.
+    """
     if instrument not in STRUCTURED_DIMENSIONS:
         raise InvalidLabel(f"unknown instrument {instrument!r}")
 
@@ -195,8 +205,18 @@ def strict_parse_label(raw: str, instrument: str) -> list[dict]:
             result[key] = value
         return result
 
+    text = raw.strip()
+    fenced = list(re.finditer(r"```(?:json)?\s*(.*?)```", text, re.I | re.S))
+    if len(fenced) == 1:
+        # Gemma sometimes adds prose before its one JSON fence. The prose is
+        # discarded, but the extracted payload still faces the exact schema,
+        # type, range, duplicate-key, and explanation checks below.
+        text = fenced[0].group(1).strip()
+    elif len(fenced) > 1:
+        raise InvalidLabel("completion contains more than one fenced block")
+
     try:
-        payload = json.loads(raw.strip(), object_pairs_hook=unique_object)
+        payload = json.loads(text, object_pairs_hook=unique_object)
     except InvalidLabel:
         raise
     except (TypeError, json.JSONDecodeError) as exc:
@@ -254,6 +274,16 @@ def _mock_completion(instrument: str, seed_text: str) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
+def _valid_under_current_parser(row: dict) -> bool:
+    if row.get("error"):
+        return False
+    try:
+        strict_parse_label(row.get("raw", ""), row.get("instrument", ""))
+    except InvalidLabel:
+        return False
+    return True
+
+
 def _completed(rows: list[dict], labeling) -> tuple[set[str], Counter, set[str]]:
     done, attempts, latest = set(), Counter(), {}
     for row in rows:
@@ -262,7 +292,10 @@ def _completed(rows: list[dict], labeling) -> tuple[set[str], Counter, set[str]]
             continue
         attempts[key] += 1
         latest[key] = row
-        if not row.get("error") and row.get("strict_valid") is True:
+        # Revalidate instead of trusting the historical flag. Parser-only
+        # format fixes (such as accepting Gemma's JSON fence) can make an
+        # existing deterministic completion usable without another GPU call.
+        if _valid_under_current_parser(row):
             done.add(key)
     exhausted = set()
     for key, row in latest.items():
@@ -278,6 +311,32 @@ def _completed(rows: list[dict], labeling) -> tuple[set[str], Counter, set[str]]
         if attempts[key] >= limit:
             exhausted.add(key)
     return done, attempts, exhausted
+
+
+def _prompt_matching_frozen_digest(
+    instrument: str,
+    persona_messages,
+    post_text: str,
+    frozen_digest: str,
+) -> str:
+    """Use v2 for new datasets and reproduce paper-v1 frozen prompt bytes."""
+    versions = (
+        (FOUR_DIMS_PROMPT_EXPLICIT_V2, FOUR_DIMS_PROMPT_PAPER_V1)
+        if instrument == "4dims"
+        else (None,)
+    )
+    for version in versions:
+        kwargs = ({"four_dims_prompt_version": version} if version else {})
+        text = build_label_prompt(
+            instrument, persona_messages, post_text, **kwargs
+        )
+        digest = hashlib.sha256(text.encode()).hexdigest()[:20]
+        if digest == frozen_digest:
+            return text
+    raise RuntimeError(
+        "label prompt drift: neither the explicit 0-1 nor paper-v1 builder "
+        "matches the frozen design"
+    )
 
 
 def run_labeling(config, artifacts, *, dry_run: bool = False,
@@ -401,18 +460,20 @@ def run_labeling(config, artifacts, *, dry_run: bool = False,
             batch = [queue.popleft() for _ in range(min(batch_size, len(queue)))]
             conversations, prompts = [], []
             for cell, dataset_row, instrument, _, _ in batch:
-                text = build_label_prompt(
-                    instrument, cell.persona.messages, cell.prompt.text
-                )
-                digest = hashlib.sha256(text.encode()).hexdigest()[:20]
                 frozen_digest = getattr(
                     dataset_row, f"label_prompt_digest_{instrument}"
                 )
-                if digest != frozen_digest:
-                    raise RuntimeError(
-                        f"label prompt drift for {cell_id(cell)}/{instrument}: "
-                        "the current builder no longer matches the frozen design"
+                try:
+                    text = _prompt_matching_frozen_digest(
+                        instrument,
+                        cell.persona.messages,
+                        cell.prompt.text,
+                        frozen_digest,
                     )
+                except RuntimeError as exc:
+                    raise RuntimeError(
+                        f"label prompt drift for {cell_id(cell)}/{instrument}: {exc}"
+                    ) from exc
                 prompts.append(text)
                 conversations.append(Conversation(
                     messages=({"role": "user", "content": text},), system=""
@@ -690,7 +751,9 @@ def parse_labels(config, artifacts) -> tuple[pd.DataFrame, dict]:
     for row in canonical:
         task = expected_tasks[row["label_key"]]
         parsed = []
-        parse_error = row.get("error") or row.get("validation_error") or ""
+        # Stored validation_error describes the parser at generation time.
+        # Re-evaluate raw text so format-only parser fixes apply retroactively.
+        parse_error = row.get("error") or ""
         if not parse_error:
             try:
                 parsed = strict_parse_label(

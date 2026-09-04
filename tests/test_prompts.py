@@ -15,10 +15,12 @@ import re
 import pytest
 
 from syco.prompts import (
+    FOUR_DIMS_PROMPT_PAPER_V1,
     UNPORTED_PROBE_KINDS,
     ProbeSpec,
     build,
     build_prompt_4dims,
+    build_prompt_4dims_paper_v1,
     build_prompt_openended,
     build_prompt_supporttypes,
 )
@@ -87,11 +89,20 @@ def test_probe_kinds_are_the_papers_own_names():
 
 @pytest.mark.parametrize("history", [HISTORY, "", "   \n  "])
 @pytest.mark.parametrize("name,ours", [
-    ("build_prompt_4dims", build_prompt_4dims),
+    ("build_prompt_4dims", build_prompt_4dims_paper_v1),
     ("build_prompt_supporttypes", build_prompt_supporttypes),
 ])
-def test_structured_prompts_match_the_paper(name, ours, history):
+def test_paper_v1_structured_prompts_match_the_reference(name, ours, history):
     assert ours(history, POST) == _reference(name)(history, POST)
+
+
+def test_new_4dims_prompt_states_the_scale_unambiguously():
+    prompt = build_prompt_4dims(HISTORY, POST)
+    assert "between 0 and 1 inclusive" in prompt
+    assert "do not use a -1 to 1 or 0 to 10 scale" in prompt
+    assert prompt != build_prompt_4dims(
+        HISTORY, POST, prompt_version=FOUR_DIMS_PROMPT_PAPER_V1
+    )
 
 
 def test_structured_dimension_keys_appear_in_their_own_prompt():

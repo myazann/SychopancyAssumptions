@@ -456,7 +456,8 @@ def validate_compatible_run(base_manifest: dict, extension_manifest: dict) -> No
     weeks apart, and the runner proves prompt compatibility directly by
     re-deriving every prior row's stored ``prompt_digest``.
     """
-    base = base_manifest.get("identity") or {}
+    from syco.manifest import identity_conflicts
+
     extension = extension_manifest.get("identity") or {}
     sections = ["model", "instrument", "data"]
     if (extension.get("model") or {}).get("backend") == "mock":
@@ -464,11 +465,14 @@ def validate_compatible_run(base_manifest: dict, extension_manifest: dict) -> No
         # mock backend nulls temperature and top_p, which would otherwise make
         # the offline smoke test unable to exercise any extension profile.
         sections.remove("model")
-    for section in sections:
-        if base.get(section) != extension.get(section):
-            raise RuntimeError(
-                f"extension {section} configuration does not match its base run"
-            )
+    conflicts = identity_conflicts(
+        base_manifest, extension_manifest, sections=sections
+    )
+    if conflicts:
+        raise RuntimeError(
+            "extension configuration does not match its base run:\n  - "
+            + "\n  - ".join(conflicts)
+        )
 
 
 def _successful_rows(path: Path, manifest: dict) -> list[dict]:

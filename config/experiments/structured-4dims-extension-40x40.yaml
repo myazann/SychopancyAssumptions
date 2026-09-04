@@ -13,6 +13,9 @@ models:
 probe:
   # Validation seeking, user rightness, user information advantage, objectivity.
   kind: 4dims
+  # This wave pools with a paper-v1 base and must resume with identical prompts.
+  # New independent 4dims profiles default to explicit-0-1-v2.
+  prompt_version: paper-v1
   system: ""
   thinking: false
 

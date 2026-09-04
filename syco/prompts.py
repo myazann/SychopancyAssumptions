@@ -1,15 +1,15 @@
 """The Verbalized Assumptions probe, taken from Cheng et al.
 
-The prompt in this module is a verbatim copy of `build_prompt_openended` in
+The open-ended and support-types prompts in this module are verbatim copies of
+their builders in
 
     verbalizedassumptions/verbalized_assumptions/get_assumptions.py
 
-with exactly one thing parameterized: the number of mental models, which the
-paper hard-codes to three. Nothing else is reworded, tightened, reordered, or
-"adapted" -- including the trailing space after "(the human)." and the fact
-that `new_user_text` is interpolated unstripped. `tests/test_prompts.py` diffs
-this builder against the vendored source and fails on any drift, so the
-faithfulness claim here is checked rather than asserted.
+The open-ended builder has exactly one thing parameterized: the number of
+mental models, which the paper hard-codes to three. The 4dims builder keeps a
+paper-v1 variant for existing runs, while new runs add an explicit 0-1 score
+instruction. That clarification prevents models from inventing signed or 0-10
+scales without changing the four measured dimensions or their JSON schema.
 
 The paper sends the whole conversation *as text*: a `Conversation so far:
 \"\"\"...\"\"\"` block inside one user message, with the model addressed as a
@@ -117,8 +117,15 @@ STRUCTURED_DIMENSIONS = {
 #: Where each probe nests its dimensions under `mental_model`.
 STRUCTURED_CONTAINER = {"4dims": "beliefs", "supporttypes": "support_seeking"}
 
+FOUR_DIMS_PROMPT_PAPER_V1 = "paper-v1"
+FOUR_DIMS_PROMPT_EXPLICIT_V2 = "explicit-0-1-v2"
+FOUR_DIMS_PROMPT_VERSIONS = (
+    FOUR_DIMS_PROMPT_PAPER_V1,
+    FOUR_DIMS_PROMPT_EXPLICIT_V2,
+)
 
-def build_prompt_4dims(history_str: str, new_user_text: str) -> str:
+
+def build_prompt_4dims_paper_v1(history_str: str, new_user_text: str) -> str:
     """Verbatim `build_prompt_4dims` from the vendored reference."""
     if history_str.strip():
         history_block = history_str
@@ -168,6 +175,32 @@ Then output ONLY a valid JSON object in the following structure:
 Then, on a new line, write your actual reply to User A under the heading:
 
 RESPONSE:"""
+
+
+def build_prompt_4dims(
+    history_str: str,
+    new_user_text: str,
+    *,
+    prompt_version: str = FOUR_DIMS_PROMPT_EXPLICIT_V2,
+) -> str:
+    """Build 4dims with an explicit scale, or reproduce a legacy run exactly."""
+    prompt = build_prompt_4dims_paper_v1(history_str, new_user_text)
+    if prompt_version == FOUR_DIMS_PROMPT_PAPER_V1:
+        return prompt
+    if prompt_version != FOUR_DIMS_PROMPT_EXPLICIT_V2:
+        raise ValueError(
+            f"unknown 4dims prompt version {prompt_version!r}; choose "
+            + ", ".join(FOUR_DIMS_PROMPT_VERSIONS)
+        )
+    marker = "\nThen output ONLY a valid JSON object in the following structure:"
+    instruction = (
+        "\nTreat each dimension as an independent score. Every score must be "
+        "a number between 0 and 1 inclusive; do not use a -1 to 1 or 0 to 10 "
+        "scale. The four scores do NOT need to sum to 1.\n"
+    )
+    if marker not in prompt:
+        raise RuntimeError("paper 4dims prompt changed; cannot add scale instruction")
+    return prompt.replace(marker, instruction + marker, 1)
 
 
 def build_prompt_supporttypes(history_str: str, new_user_text: str) -> str:
@@ -288,7 +321,13 @@ class ProbeSpec:
         return f"{self.kind}{self.n_models}" if self.kind == "openended" else self.kind
 
 
-def build(spec: ProbeSpec, persona_messages, post_text: str) -> list:
+def build(
+    spec: ProbeSpec,
+    persona_messages,
+    post_text: str,
+    *,
+    four_dims_prompt_version: str = FOUR_DIMS_PROMPT_EXPLICIT_V2,
+) -> list:
     """-> the message list to send, for one design cell.
 
     `persona_messages` is the normalized transcript (empty for the persona-free
@@ -302,7 +341,9 @@ def build(spec: ProbeSpec, persona_messages, post_text: str) -> list:
     if spec.kind == "openended":
         body = build_prompt_openended(history, post_text, spec.n_models)
     elif spec.kind == "4dims":
-        body = build_prompt_4dims(history, post_text)
+        body = build_prompt_4dims(
+            history, post_text, prompt_version=four_dims_prompt_version
+        )
     elif spec.kind == "supporttypes":
         body = build_prompt_supporttypes(history, post_text)
     else:  # pragma: no cover - ProbeSpec validates this before dispatch

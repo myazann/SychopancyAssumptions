@@ -14,14 +14,15 @@ unescaped `"` inside one explanation. Each is handled here, and each is also
 because a finding that only holds on salvaged rows is a finding about the
 parser.
 
-What is deliberately NOT handled: a score outside 0-1. A model that answers the
-structured probe on a 0-10 scale has answered a different instrument, so those
-dimensions are recorded as null rather than divided by ten -- see
-`_to_structured_score`.
+For the 4dims probe, two observed scale deviations are handled explicitly and
+reported in `parse_notes`: a negative score is capped at zero, and a response
+using a 0-10 scale is rescaled as a whole to 0-1. Supporttypes remains strict
+because its prompt already states the required scale.
 """
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Optional
@@ -447,25 +448,67 @@ STRUCTURED_LEAN_COLUMNS = (
 )
 
 
-def _to_structured_score(value) -> Optional[float]:
-    """Read a 0-1 score without treating an out-of-range decimal as percent.
-
-    A literal ``70%`` is unambiguous and accepted as 0.7. A bare ``1.2`` is
-    invalid for this instrument, rather than being silently reinterpreted as
-    1.2%.
-    """
+def _read_structured_number(value) -> tuple[Optional[float], bool]:
+    """Read a finite numeric score and whether it was an explicit percent."""
     if isinstance(value, bool) or value is None:
-        return None
+        return None, False
+    was_percent = False
     if isinstance(value, (int, float)):
         number = float(value)
     else:
         text = str(value).strip().strip("\"'")
         percent = _PERCENT_RE.match(text)
         try:
+            was_percent = percent is not None
             number = float(percent.group(1)) / 100.0 if percent else float(text)
         except ValueError:
-            return None
-    return number if 0.0 <= number <= 1.0 else None
+            return None, False
+    return (number, was_percent) if math.isfinite(number) else (None, was_percent)
+
+
+def _normalize_structured_scores(values: list, kind: str) -> tuple[list, list[str]]:
+    """Normalize the documented 4dims model deviations as one response scale.
+
+    Values already in [0, 1] stay unchanged. If any non-percent score is above
+    one and no score exceeds ten, the response is treated as using a 0-10
+    scale and every nonnegative value is divided by ten. Negative 4dims scores
+    are capped at zero. Supporttypes retains its strict 0-1 behavior.
+    """
+    parsed = [_read_structured_number(value) for value in values]
+    finite = [number for number, percent in parsed if number is not None and not percent]
+    ten_scale = (
+        kind == "4dims"
+        and any(number > 1.0 for number in finite)
+        and all(number <= 10.0 for number in finite)
+    )
+    normalized = []
+    capped = []
+    scaled = []
+    for index, (number, was_percent) in enumerate(parsed):
+        if number is None:
+            normalized.append(None)
+        elif was_percent:
+            normalized.append(number if 0.0 <= number <= 1.0 else None)
+        elif kind == "4dims" and number < 0.0:
+            normalized.append(0.0)
+            capped.append(index)
+        elif ten_scale and 0.0 <= number <= 10.0:
+            normalized.append(number / 10.0)
+            scaled.append(index)
+        else:
+            normalized.append(number if 0.0 <= number <= 1.0 else None)
+    notes = []
+    if capped:
+        notes.append("negative 4dims score(s) capped at 0")
+    if scaled:
+        notes.append("4dims score(s) rescaled from 0-10 to 0-1")
+    return normalized, notes
+
+
+def _to_structured_score(value) -> Optional[float]:
+    """Backwards-compatible strict 0-1 conversion for one isolated value."""
+    number, _ = _read_structured_number(value)
+    return number if number is not None and 0.0 <= number <= 1.0 else None
 
 
 #: `"<dimension>": { ... }` -- just the anchor; the body is read separately,
@@ -513,7 +556,7 @@ def _regex_beliefs(source: str, wanted: tuple) -> dict:
         if score is None and explanation is None:
             continue
         found[dimension] = (
-            _to_structured_score(score.group("score")) if score else None,
+            score.group("score") if score else None,
             (explanation.group("explanation").strip() if explanation else ""),
         )
     return found
@@ -522,11 +565,10 @@ def _regex_beliefs(source: str, wanted: tuple) -> dict:
 def parse_structured(raw: str, kind: str) -> ParsedStructured:
     """Pull `mental_model.<container>.<dimension>.{score, explanation}` out.
 
-    Unlike the open-ended probe there is no `sums to 1` invariant to check --
-    `supporttypes` states outright that its dimensions are independent and do
-    NOT need to sum to 1, so nothing here normalizes them. Missing dimensions
-    are emitted with a null score rather than dropped, so a cell always has one
-    row per dimension the prompt asked for and a gap is visible as a null.
+    Unlike the open-ended probe there is no `sums to 1` invariant to check.
+    The dimensions remain independent. The only scale normalization is the
+    documented 4dims repair in `_normalize_structured_scores`; missing
+    dimensions are emitted with a null score rather than dropped.
     """
     from syco.prompts import STRUCTURED_CONTAINER, STRUCTURED_DIMENSIONS
 
@@ -584,14 +626,21 @@ def parse_structured(raw: str, kind: str) -> ParsedStructured:
         # Field-by-field, before giving up: an unescaped `"` in one explanation
         # is not a reason to lose the other dimensions in the cell.
         salvaged = _regex_beliefs(head, wanted) or _regex_beliefs(raw, wanted)
-        if any(score is not None for score, _ in salvaged.values()):
+        raw_scores = [salvaged.get(dimension, (None, ""))[0] for dimension in wanted]
+        scores, normalization_notes = _normalize_structured_scores(raw_scores, kind)
+        if any(score is not None for score in scores):
             result.beliefs = [
-                Belief(dimension, *salvaged.get(dimension, (None, "")))
-                for dimension in wanted
+                Belief(
+                    dimension,
+                    scores[index],
+                    salvaged.get(dimension, (None, ""))[1],
+                )
+                for index, dimension in enumerate(wanted)
             ]
             missing = [b.dimension for b in result.beliefs if b.score is None]
             if missing:
                 notes.append(f"missing score(s): {', '.join(missing)}")
+            notes.extend(normalization_notes)
             notes.append("regex salvage")
             if not result.has_response:
                 notes.append("empty RESPONSE" if has_response
@@ -625,28 +674,34 @@ def parse_structured(raw: str, kind: str) -> ParsedStructured:
         result.notes = "; ".join(notes + ["no dimension object found"])
         return result
 
-    found = 0
-    invalid = []
+    raw_scores = []
+    explanations = []
     for dimension in wanted:
         entry = scope.get(dimension)
         if isinstance(entry, dict):
-            raw_score = entry.get("score")
-            score = _to_structured_score(raw_score)
-            explanation = str(entry.get("explanation") or "").strip()
-            if raw_score is not None and score is None:
-                invalid.append(dimension)
+            raw_scores.append(entry.get("score"))
+            explanations.append(str(entry.get("explanation") or "").strip())
         elif entry is None:
-            score, explanation = None, ""
+            raw_scores.append(None)
+            explanations.append("")
         else:
             # A model that emitted a bare number instead of {score, explanation}.
-            score, explanation = _to_structured_score(entry), ""
-            if score is not None:
-                notes.append(f"{dimension}: bare score")
-            else:
-                invalid.append(dimension)
-        if score is not None:
-            found += 1
-        result.beliefs.append(Belief(dimension, score, explanation))
+            raw_scores.append(entry)
+            explanations.append("")
+            notes.append(f"{dimension}: bare score")
+
+    scores, normalization_notes = _normalize_structured_scores(raw_scores, kind)
+    notes.extend(normalization_notes)
+    invalid = [
+        dimension
+        for dimension, raw_score, score in zip(wanted, raw_scores, scores)
+        if raw_score is not None and score is None
+    ]
+    result.beliefs = [
+        Belief(dimension, score, explanation)
+        for dimension, score, explanation in zip(wanted, scores, explanations)
+    ]
+    found = sum(score is not None for score in scores)
 
     missing = [b.dimension for b in result.beliefs if b.score is None]
     if missing:

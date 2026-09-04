@@ -26,6 +26,7 @@ from syco.linear_probe.dataset import assign_splits
 from syco.linear_probe.evaluation import _effect_record, _pair
 from syco.linear_probe.labels import (
     InvalidLabel,
+    _completed,
     parse_labels,
     raw_label_paths,
     run_labeling,
@@ -200,8 +201,35 @@ def test_strict_label_parser_accepts_only_exact_schema(kind):
     for payload in corruptions:
         with pytest.raises(InvalidLabel):
             strict_parse_label(json.dumps(payload), kind)
-    with pytest.raises(InvalidLabel):
-        strict_parse_label("```json\n" + _valid_label(kind) + "\n```", kind)
+    fenced = strict_parse_label("```json\n" + _valid_label(kind) + "\n```", kind)
+    assert [row["dimension"] for row in fenced] == list(
+        STRUCTURED_DIMENSIONS[kind]
+    )
+    prefaced = strict_parse_label(
+        "Here you go:\n```json\n" + _valid_label(kind) + "\n```", kind
+    )
+    assert len(prefaced) == len(STRUCTURED_DIMENSIONS[kind])
+    with pytest.raises(InvalidLabel, match="more than one fenced block"):
+        strict_parse_label(
+            "```json\n" + _valid_label(kind) + "\n```\n```\n{}\n```", kind
+        )
+
+
+def test_resume_revalidates_old_format_failures_with_the_current_parser():
+    row = {
+        "label_key": "gemma-fenced",
+        "instrument": "4dims",
+        "raw": "```json\n" + _valid_label("4dims") + "\n```",
+        "strict_valid": False,
+        "validation_error": "not a bare valid JSON object",
+        "error": "",
+    }
+    done, attempts, exhausted = _completed(
+        [row], SimpleNamespace(max_attempts=3, temperature=0.0)
+    )
+    assert done == {"gemma-fenced"}
+    assert attempts == {"gemma-fenced": 1}
+    assert exhausted == set()
 
 
 def test_strict_label_parser_rejects_duplicate_keys_and_empty_explanations():
